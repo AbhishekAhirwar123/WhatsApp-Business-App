@@ -125,13 +125,28 @@ export interface ResumePlan {
 interface RecipientRow {
   id: string;
   template_params: unknown;
-  contact: { phone?: string | null } | { phone?: string | null }[] | null;
+  contact: RecipientContact | RecipientContact[] | null;
+}
+
+interface RecipientContact {
+  phone?: string | null;
+  blocked_at?: string | null;
+  opt_in_status?: string | null;
 }
 
 /** Supabase renders an embedded to-one join as an object or a 1-array. */
+function contactOf(row: RecipientRow): RecipientContact | null {
+  return (Array.isArray(row.contact) ? row.contact[0] : row.contact) ?? null;
+}
+
 function contactPhone(row: RecipientRow): string | null {
-  const c = Array.isArray(row.contact) ? row.contact[0] : row.contact;
-  return c?.phone ?? null;
+  return contactOf(row)?.phone ?? null;
+}
+
+/** Blocked or opted-out contacts must not receive a broadcast (migration 044). */
+function isSuppressed(row: RecipientRow): boolean {
+  const c = contactOf(row);
+  return !!c?.blocked_at || c?.opt_in_status === 'opted_out';
 }
 
 /**
@@ -165,7 +180,7 @@ export async function planBroadcastResume(
   const statuses = scopeStatuses(scope);
   const { data: rawRows, error: recError } = await db
     .from('broadcast_recipients')
-    .select('id, template_params, contact:contacts(phone)')
+    .select('id, template_params, contact:contacts(phone, blocked_at, opt_in_status)')
     .eq('broadcast_id', broadcastId)
     .in('status', statuses)
     // Oldest first, so repeated capped passes chew through the backlog
@@ -184,10 +199,21 @@ export async function planBroadcastResume(
   // 'sending' forever, which is the very symptom being fixed.
   const sendable: RecipientRow[] = [];
   const unsendable: string[] = [];
+  const suppressed: string[] = [];
   for (const row of rows) {
     const sanitized = sanitizePhoneForMeta(contactPhone(row) ?? '');
-    if (isValidE164(sanitized)) sendable.push(row);
+    if (isSuppressed(row)) suppressed.push(row.id);
+    else if (isValidE164(sanitized)) sendable.push(row);
     else unsendable.push(row.id);
+  }
+  if (suppressed.length > 0) {
+    await db
+      .from('broadcast_recipients')
+      .update({
+        status: 'failed',
+        error_message: 'Contact is blocked or opted out',
+      })
+      .in('id', suppressed);
   }
   if (unsendable.length > 0) {
     await db
@@ -256,7 +282,7 @@ export async function planBroadcastResume(
     rejected: 0,
   };
 
-  return { plan, remaining, unsendable: unsendable.length };
+  return { plan, remaining, unsendable: unsendable.length + suppressed.length };
 }
 
 /**

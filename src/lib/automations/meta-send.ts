@@ -9,7 +9,7 @@ import {
   phoneVariants,
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
-import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
+import { assertContactNotBlocked, resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
 import {
   resolveTemplateRow,
   templateContentText,
@@ -121,7 +121,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
   // new tenancy column.
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone, wa_user_id')
+    .select('id, phone, wa_user_id, blocked_at')
     .eq('id', input.contactId)
     .eq('account_id', input.accountId)
     .maybeSingle()
@@ -131,6 +131,7 @@ async function sendViaMeta(input: SendInput): Promise<{ whatsapp_message_id: str
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
+  assertContactNotBlocked(contact)
   const sendTarget = resolveContactSendTarget(contact)
   if (!sendTarget) {
     throw new Error(

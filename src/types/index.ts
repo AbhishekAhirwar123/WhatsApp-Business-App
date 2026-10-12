@@ -119,6 +119,22 @@ export interface Contact {
   email?: string;
   company?: string;
   avatar_url?: string;
+  /**
+   * Consent evidence (migration 044). `unknown` until someone records it;
+   * an inbound message alone is not marketing opt-in.
+   */
+  opt_in_status?: 'unknown' | 'opted_in' | 'opted_out';
+  opt_in_source?: string | null;
+  opt_in_scope?: string | null;
+  opt_in_at?: string | null;
+  opt_in_recorded_by?: string | null;
+  opt_out_at?: string | null;
+  /** Local CRM block — sends from UI, workers and automations are refused. */
+  blocked_at?: string | null;
+  blocked_by?: string | null;
+  blocked_reason?: string | null;
+  /** "Contact Owner" — an account member, distinct from the chat assignee. */
+  owner_user_id?: string | null;
   created_at: string;
   updated_at: string;
   /** Hydrated by queries that embed `contact_tags(tags(*))` (e.g. the

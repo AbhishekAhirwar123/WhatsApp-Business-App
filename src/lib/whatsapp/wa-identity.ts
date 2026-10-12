@@ -200,3 +200,17 @@ export function resolveContactSendTarget(contact: {
 
   return null
 }
+
+/**
+ * Bot / automation / flow sends to a contact the business blocked in the
+ * CRM must not go out (inbox parity: local block applies to workers and
+ * automation, not just the composer). This is a CRM-side block only — it
+ * does not block the number on WhatsApp.
+ */
+export function assertContactNotBlocked(
+  contact: { blocked_at?: string | null } | null | undefined,
+): void {
+  if (contact?.blocked_at) {
+    throw new Error('contact is blocked in the CRM')
+  }
+}

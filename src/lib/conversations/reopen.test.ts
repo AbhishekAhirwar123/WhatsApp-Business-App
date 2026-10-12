@@ -109,3 +109,23 @@ describe('reopenClosedConversation', () => {
     spy.mockRestore()
   })
 })
+
+describe('reopenClosedConversation — account policy (inbox_settings)', () => {
+  it('leaves a closed conversation resolved when the account disabled reopen-on-inbound', async () => {
+    const { client, calls } = stubClient()
+    const reopened = await reopenClosedConversation(
+      client,
+      { id: 'conv-1', status: 'closed' },
+      { reopenOnInbound: false },
+    )
+    expect(reopened).toBe(false)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('reopens when the policy is on (the default)', async () => {
+    const { client } = stubClient()
+    expect(
+      await reopenClosedConversation(client, { id: 'c', status: 'closed' }, { reopenOnInbound: true }),
+    ).toBe(true)
+  })
+})

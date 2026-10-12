@@ -13,7 +13,7 @@ import {
   phoneVariants,
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
-import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
+import { assertContactNotBlocked, resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
 import { supabaseAdmin } from './admin-client'
 
 // ------------------------------------------------------------
@@ -92,7 +92,7 @@ export async function engineSendText(
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone, wa_user_id')
+    .select('id, phone, wa_user_id, blocked_at')
     .eq('id', args.contactId)
     .eq('account_id', args.accountId)
     .maybeSingle()
@@ -102,6 +102,7 @@ export async function engineSendText(
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
+  assertContactNotBlocked(contact)
   const sendTarget = resolveContactSendTarget(contact)
   if (!sendTarget) {
     throw new Error(
@@ -201,7 +202,7 @@ export async function engineSendMedia(
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone, wa_user_id')
+    .select('id, phone, wa_user_id, blocked_at')
     .eq('id', args.contactId)
     .eq('account_id', args.accountId)
     .maybeSingle()
@@ -211,6 +212,7 @@ export async function engineSendMedia(
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
+  assertContactNotBlocked(contact)
   const sendTarget = resolveContactSendTarget(contact)
   if (!sendTarget) {
     throw new Error(
@@ -352,7 +354,7 @@ async function sendInteractiveViaMeta(
   // Migration 017 moved both tables to account-scoped tenancy.
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone, wa_user_id')
+    .select('id, phone, wa_user_id, blocked_at')
     .eq('id', input.contactId)
     .eq('account_id', input.accountId)
     .maybeSingle()
@@ -362,6 +364,7 @@ async function sendInteractiveViaMeta(
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
+  assertContactNotBlocked(contact)
   const sendTarget = resolveContactSendTarget(contact)
   if (!sendTarget) {
     throw new Error(

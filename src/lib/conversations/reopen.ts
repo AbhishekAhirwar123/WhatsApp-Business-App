@@ -19,7 +19,11 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 export async function reopenClosedConversation(
   db: SupabaseClient,
   conversation: { id: string; status?: string | null },
+  // Account policy (inbox_settings.reopen_on_inbound, migration 044).
+  // Defaults to the long-standing behaviour: reopen.
+  options: { reopenOnInbound?: boolean } = {},
 ): Promise<boolean> {
+  if (options.reopenOnInbound === false) return false
   // Nothing to do for open/pending threads, which is the common case —
   // skipping the round trip keeps inbound processing as cheap as it was.
   if (conversation.status !== 'closed') return false

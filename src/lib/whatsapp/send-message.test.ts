@@ -212,6 +212,9 @@ function sendPathDb(
   const conversation = {
     id: 'cv-1',
     contact,
+    // Customer wrote a minute ago, so the 24h window is open — these
+    // tests are about routing/persistence, not eligibility.
+    last_inbound_at: new Date(Date.now() - 60_000).toISOString(),
   };
   const config = {
     id: 'cfg-1',

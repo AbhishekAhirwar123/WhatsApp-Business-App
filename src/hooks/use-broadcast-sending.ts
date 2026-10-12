@@ -245,6 +245,12 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       contacts = contacts.filter((c) => !excludedIds.has(c.id));
     }
 
+    // Never broadcast to contacts blocked in the CRM or opted out of
+    // business-initiated messages (migration 044).
+    contacts = contacts.filter(
+      (c) => !c.blocked_at && c.opt_in_status !== 'opted_out',
+    );
+
     return contacts;
   }
 
