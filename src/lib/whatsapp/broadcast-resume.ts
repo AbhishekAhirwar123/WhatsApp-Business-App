@@ -21,7 +21,14 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { BroadcastError, type BroadcastPlan } from '@/lib/whatsapp/broadcast-core';
 import { decrypt } from '@/lib/whatsapp/encryption';
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
-import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils';
+import {
+  sanitizePhoneForMeta,
+  isValidE164,
+  fixDoubledCountryCode,
+} from '@/lib/whatsapp/phone-utils';
+
+/** Repair a doubled country code ("91 91 …") so Meta can deliver it. */
+const repairPhone = (digits: string) => fixDoubledCountryCode(digits) ?? digits;
 
 /** Which recipients a resume pass picks up. */
 export type ResumeScope = 'pending' | 'failed' | 'all';
@@ -241,7 +248,7 @@ export async function planBroadcastResume(
     templateRow: resolvedTemplate.row,
     planned: slice.map((row) => ({
       recipientRowId: row.id,
-      phone: sanitizePhoneForMeta(contactPhone(row) ?? ''),
+      phone: repairPhone(sanitizePhoneForMeta(contactPhone(row) ?? '')),
       params: Array.isArray(row.template_params)
         ? row.template_params.filter((p): p is string => typeof p === 'string')
         : [],

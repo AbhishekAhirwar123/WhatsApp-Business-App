@@ -61,7 +61,18 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     .split(',')
     .map((h) => h.trim().toLowerCase().replace(/["']/g, ''));
 
-  const phoneIdx = headers.indexOf('phone');
+  // Accept the usual spreadsheet spellings, not only a literal `phone`.
+  const firstOf = (names: string[]) => {
+    for (const n of names) {
+      const idx = headers.indexOf(n);
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+  const phoneIdx = firstOf([
+    'phone', 'phone number', 'mobile', 'mobile number', 'mobile no',
+    'whatsapp', 'whatsapp number', 'contact number',
+  ]);
   if (phoneIdx === -1) {
     return {
       rows: [],
@@ -71,7 +82,7 @@ export function parseContactCsv(text: string): ParseContactCsvResult {
     };
   }
 
-  const nameIdx = headers.indexOf('name');
+  const nameIdx = firstOf(['name', 'full name', 'customer name', 'client name']);
   const emailIdx = headers.indexOf('email');
   const companyIdx = headers.indexOf('company');
   const tagsIdx = headers.indexOf('tags');

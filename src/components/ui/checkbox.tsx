@@ -7,7 +7,9 @@ import { Check, Minus } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 // Root: primary token when checked or indeterminate (responds to the active
-// color theme), input border when unchecked. Mirrors switch.tsx conventions.
+// color theme), muted border when unchecked. Mirrors switch.tsx conventions.
+// Base UI renders the root as a <span>, so it needs inline-flex — without
+// it `size-4` is ignored and the box collapses to a thin vertical line.
 function Checkbox({
   className,
   ...props
@@ -16,7 +18,7 @@ function Checkbox({
     <CheckboxPrimitive.Root
       data-slot="checkbox"
       className={cn(
-        "peer size-4 shrink-0 cursor-pointer rounded-[4px] border border-input bg-card shadow-sm transition-colors",
+        "peer inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-[4px] border border-muted-foreground/50 bg-card shadow-sm transition-colors",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         "disabled:cursor-not-allowed disabled:opacity-50",
         "data-[checked]:border-primary data-[checked]:bg-primary data-[checked]:text-primary-foreground",

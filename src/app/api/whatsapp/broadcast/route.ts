@@ -9,6 +9,7 @@ import {
   isValidE164,
   phoneVariants,
   isRecipientNotAllowedError,
+  fixDoubledCountryCode,
 } from '@/lib/whatsapp/phone-utils'
 import {
   checkRateLimit,
@@ -165,7 +166,11 @@ export async function POST(request: Request) {
     let failedCount = 0
 
     for (const recipient of recipients) {
-      const sanitized = sanitizePhoneForMeta(recipient.phone)
+      // A contact saved as "+91 91 98765 43210" (country code typed
+      // twice) is a 14-digit number Meta rejects as undeliverable
+      // (#131026). Send to the repaired number instead.
+      const rawDigits = sanitizePhoneForMeta(recipient.phone)
+      const sanitized = fixDoubledCountryCode(rawDigits) ?? rawDigits
 
       if (!isValidE164(sanitized)) {
         results.push({

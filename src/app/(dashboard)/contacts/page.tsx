@@ -49,11 +49,24 @@ import {
   SlidersHorizontal,
   Filter,
   X,
+  FolderPlus,
+  FolderMinus,
+  ArrowLeft,
+  AlertTriangle,
+  Wrench,
 } from 'lucide-react';
 import { ContactForm } from '@/components/contacts/contact-form';
 import { ContactDetailView } from '@/components/contacts/contact-detail-view';
 import { ImportModal } from '@/components/contacts/import-modal';
 import { CustomFieldsManager } from '@/components/contacts/custom-fields-manager';
+import { ContactGroups } from '@/components/contacts/contact-groups';
+import { FixPhoneNumbersDialog } from '@/components/contacts/fix-phone-numbers-dialog';
+import {
+  findPhoneRepairs,
+  type PhoneRepairCandidate,
+} from '@/lib/contacts/phone-repair';
+import { fetchAllPages } from '@/lib/broadcast-audience';
+import { useAuth } from '@/hooks/use-auth';
 import { useCan } from '@/hooks/use-can';
 import { GatedButton } from '@/components/ui/gated-button';
 import { useTranslations } from 'next-intl';
@@ -69,6 +82,7 @@ export default function ContactsPage() {
   const supabase = createClient();
   const canEdit = useCan('send-messages');
   const canEditSettings = useCan('edit-settings');
+  const { user, accountId } = useAuth();
 
   const [contacts, setContacts] = useState<ContactWithTags[]>([]);
   const [loading, setLoading] = useState(true);
@@ -117,6 +131,56 @@ export default function ContactsPage() {
       });
     }
   }, [supabase]);
+
+  // Group cards: contacts per tag, plus the account-wide total.
+  const [groupCounts, setGroupCounts] = useState<Record<string, number>>({});
+  const [allCount, setAllCount] = useState<number | null>(null);
+  const [selectingAll, setSelectingAll] = useState(false);
+  const [groupBusy, setGroupBusy] = useState(false);
+
+  const fetchGroupCounts = useCallback(async (tagIds: string[]) => {
+    const [{ count: total }, ...perTag] = await Promise.all([
+      supabase.from('contacts').select('id', { count: 'exact', head: true }),
+      ...tagIds.map((id) =>
+        supabase
+          .from('contact_tags')
+          .select('id', { count: 'exact', head: true })
+          .eq('tag_id', id),
+      ),
+    ]);
+    setAllCount(total ?? 0);
+    const next: Record<string, number> = {};
+    tagIds.forEach((id, i) => (next[id] = perTag[i].count ?? 0));
+    setGroupCounts(next);
+  }, [supabase]);
+
+  const tagIdsKey = Object.keys(tagsMap).sort().join(',');
+  useEffect(() => {
+    fetchGroupCounts(tagIdsKey ? tagIdsKey.split(',') : []);
+  }, [tagIdsKey, fetchGroupCounts]);
+
+  const refreshGroups = useCallback(() => {
+    fetchGroupCounts(Object.keys(tagsMap));
+  }, [fetchGroupCounts, tagsMap]);
+
+  // Contacts saved with the country code twice ("+91 91 …") — WhatsApp
+  // can't deliver to them. Scanned on load so a banner can offer the fix.
+  const [phoneRepairs, setPhoneRepairs] = useState<PhoneRepairCandidate[]>([]);
+  const [fixPhonesOpen, setFixPhonesOpen] = useState(false);
+  const scanPhones = useCallback(async () => {
+    try {
+      const all = await fetchAllPages<{ id: string; name: string | null; phone: string | null }>(
+        (from, to) =>
+          supabase.from('contacts').select('id, name, phone').order('id').range(from, to),
+      );
+      setPhoneRepairs(findPhoneRepairs(all));
+    } catch {
+      // Best-effort: the banner just doesn't show.
+    }
+  }, [supabase]);
+  useEffect(() => {
+    scanPhones();
+  }, [scanPhones]);
 
   const fetchContacts = useCallback(async () => {
     const seq = ++fetchSeq.current;
@@ -263,6 +327,7 @@ export default function ContactsPage() {
     } else {
       toast.success(t('toastDeleted'));
       fetchContacts();
+      refreshGroups();
     }
 
     setDeleting(false);
@@ -308,6 +373,8 @@ export default function ContactsPage() {
       toast.success(t('toastBulkDeleted', { count: ids.length }));
       setSelected(new Set());
       fetchContacts();
+      refreshGroups();
+      scanPhones();
     }
 
     setDeleting(false);
@@ -337,6 +404,206 @@ export default function ContactsPage() {
   function clearTagFilters() {
     setSelectedTagIds([]);
     setPage(0);
+  }
+
+  // ── Groups ─────────────────────────────────────────────────────────
+  // A group is a tag; "opening" one filters the table to it.
+  const activeGroupId = selectedTagIds.length === 1 ? selectedTagIds[0] : null;
+  const activeGroup = activeGroupId ? tagsMap[activeGroupId] : null;
+
+  function openGroup(tagId: string | null) {
+    setSelectedTagIds(tagId ? [tagId] : []);
+    setSearch('');
+    setPage(0);
+  }
+
+  async function createGroup(name: string, color: string): Promise<boolean> {
+    if (!user || !accountId) return false;
+    const exists = Object.values(tagsMap).some(
+      (tg) => tg.name.trim().toLowerCase() === name.toLowerCase(),
+    );
+    if (exists) {
+      toast.error(`A group called "${name}" already exists.`);
+      return false;
+    }
+    const { data, error } = await supabase
+      .from('tags')
+      .insert({ name, color, user_id: user.id, account_id: accountId })
+      .select('*')
+      .single();
+    if (error || !data) {
+      toast.error(`Could not create group: ${error?.message ?? 'unknown error'}`);
+      return false;
+    }
+    toast.success(`Group "${name}" created`);
+    await fetchTags();
+    return true;
+  }
+
+  async function renameGroup(tagId: string, name: string): Promise<boolean> {
+    const clash = Object.values(tagsMap).some(
+      (tg) => tg.id !== tagId && tg.name.trim().toLowerCase() === name.toLowerCase(),
+    );
+    if (clash) {
+      toast.error(`A group called "${name}" already exists.`);
+      return false;
+    }
+    const { error } = await supabase.from('tags').update({ name }).eq('id', tagId);
+    if (error) {
+      toast.error(`Could not rename group: ${error.message}`);
+      return false;
+    }
+    toast.success('Group renamed');
+    await fetchTags();
+    fetchContacts();
+    return true;
+  }
+
+  /**
+   * Delete a group (tag). Its contacts stay unless `deleteContacts` — then
+   * every contact in the group is deleted first, the tag last, so a
+   * failure part-way never leaves the contacts orphaned from their group.
+   */
+  async function deleteGroup(tagId: string, deleteContacts: boolean): Promise<boolean> {
+    const groupName = tagsMap[tagId]?.name ?? 'group';
+    try {
+      let deletedContacts = 0;
+      if (deleteContacts) {
+        const rows = await fetchAllPages<{ contact_id: string }>((from, to) =>
+          supabase
+            .from('contact_tags')
+            .select('contact_id')
+            .eq('tag_id', tagId)
+            .order('id')
+            .range(from, to),
+        );
+        const ids = [...new Set(rows.map((r) => r.contact_id))];
+        for (let i = 0; i < ids.length; i += 200) {
+          const { error } = await supabase
+            .from('contacts')
+            .delete()
+            .in('id', ids.slice(i, i + 200));
+          if (error) throw error;
+        }
+        deletedContacts = ids.length;
+      }
+      const { error } = await supabase.from('tags').delete().eq('id', tagId);
+      if (error) throw error;
+
+      toast.success(
+        deleteContacts
+          ? `Deleted "${groupName}" and ${deletedContacts} contact${deletedContacts === 1 ? '' : 's'}`
+          : `Deleted group "${groupName}" (contacts kept)`,
+      );
+      if (activeGroupId === tagId) openGroup(null);
+      setSelected(new Set());
+      await fetchTags();
+      fetchContacts();
+      refreshGroups();
+      if (deleteContacts) scanPhones();
+      return true;
+    } catch (err) {
+      toast.error(
+        `Could not delete group: ${err instanceof Error ? err.message : (err as { message?: string })?.message ?? 'unknown error'}`,
+      );
+      fetchContacts();
+      refreshGroups();
+      return false;
+    }
+  }
+
+  /**
+   * Select every contact matching the current group/search — not just the
+   * 25 on this page — so a whole segment can be grouped in one action.
+   */
+  async function selectAllMatching() {
+    setSelectingAll(true);
+    try {
+      const term = search.trim();
+      let ids: string[];
+      if (selectedTagIds.length > 0) {
+        const rows = await fetchAllPages<{ contact: Contact }>(async (from, to) => {
+          const { data, error } = await supabase.rpc('filter_contacts_by_tags', {
+            p_tag_ids: selectedTagIds,
+            p_search: term || null,
+            p_limit: to - from + 1,
+            p_offset: from,
+          });
+          return { data: data as { contact: Contact }[] | null, error };
+        });
+        ids = rows.map((r) => r.contact.id);
+      } else {
+        const rows = await fetchAllPages<{ id: string }>((from, to) => {
+          let q = supabase.from('contacts').select('id').order('id').range(from, to);
+          if (term) {
+            const like = `%${term}%`;
+            q = q.or(`name.ilike.${like},phone.ilike.${like},email.ilike.${like}`);
+          }
+          return q;
+        });
+        ids = rows.map((r) => r.id);
+      }
+      setSelected(new Set(ids));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to select contacts');
+    } finally {
+      setSelectingAll(false);
+    }
+  }
+
+  async function addSelectedToGroup(tagId: string) {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setGroupBusy(true);
+    try {
+      for (let i = 0; i < ids.length; i += 200) {
+        const { error } = await supabase.from('contact_tags').upsert(
+          ids.slice(i, i + 200).map((contact_id) => ({ contact_id, tag_id: tagId })),
+          { onConflict: 'contact_id,tag_id', ignoreDuplicates: true },
+        );
+        if (error) throw error;
+      }
+      toast.success(
+        `${ids.length} contact${ids.length === 1 ? '' : 's'} added to "${tagsMap[tagId]?.name ?? 'group'}"`,
+      );
+      setSelected(new Set());
+      fetchContacts();
+      refreshGroups();
+    } catch (err) {
+      toast.error(
+        `Could not add to group: ${err instanceof Error ? err.message : (err as { message?: string })?.message ?? 'unknown error'}`,
+      );
+    } finally {
+      setGroupBusy(false);
+    }
+  }
+
+  async function removeSelectedFromGroup(tagId: string) {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setGroupBusy(true);
+    try {
+      for (let i = 0; i < ids.length; i += 200) {
+        const { error } = await supabase
+          .from('contact_tags')
+          .delete()
+          .eq('tag_id', tagId)
+          .in('contact_id', ids.slice(i, i + 200));
+        if (error) throw error;
+      }
+      toast.success(
+        `${ids.length} contact${ids.length === 1 ? '' : 's'} removed from "${tagsMap[tagId]?.name ?? 'group'}"`,
+      );
+      setSelected(new Set());
+      fetchContacts();
+      refreshGroups();
+    } catch (err) {
+      toast.error(
+        `Could not remove from group: ${err instanceof Error ? err.message : (err as { message?: string })?.message ?? 'unknown error'}`,
+      );
+    } finally {
+      setGroupBusy(false);
+    }
   }
 
   return (
@@ -381,6 +648,61 @@ export default function ContactsPage() {
           </GatedButton>
         </div>
       </div>
+
+      {/* Group cards — one per tag, e.g. per property / project */}
+      <ContactGroups
+        groups={allTags}
+        counts={groupCounts}
+        allCount={allCount}
+        activeGroupId={selectedTagIds.length === 0 ? null : activeGroupId ?? '__multi__'}
+        onOpenGroup={openGroup}
+        onCreateGroup={canEditSettings ? createGroup : undefined}
+        onRenameGroup={canEditSettings ? renameGroup : undefined}
+        onDeleteGroup={canEditSettings ? deleteGroup : undefined}
+      />
+
+      {canEdit && phoneRepairs.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5">
+          <p className="flex items-center gap-2 text-sm text-amber-500">
+            <AlertTriangle className="size-4 shrink-0" />
+            {phoneRepairs.length} contact{phoneRepairs.length === 1 ? ' has' : 's have'} the
+            country code typed twice (e.g. +91 91 …). WhatsApp can&apos;t
+            deliver to {phoneRepairs.length === 1 ? 'it' : 'them'}.
+          </p>
+          <Button
+            size="sm"
+            onClick={() => setFixPhonesOpen(true)}
+            className="bg-amber-500 text-black hover:bg-amber-500/90"
+          >
+            <Wrench className="size-4" />
+            Review &amp; fix
+          </Button>
+        </div>
+      )}
+
+      {activeGroup && (
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => openGroup(null)}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="size-4" />
+            All contacts
+          </Button>
+          <span className="inline-flex items-center gap-2 text-lg font-semibold text-foreground">
+            <span
+              className="size-3 rounded-full"
+              style={{ backgroundColor: activeGroup.color }}
+            />
+            {activeGroup.name}
+          </span>
+          <span className="text-sm text-muted-foreground">
+            {totalCount.toLocaleString()} contacts
+          </span>
+        </div>
+      )}
 
       {/* Search + tag filter */}
       <div className="space-y-2">
@@ -500,11 +822,25 @@ export default function ContactsPage() {
 
       {/* Bulk action bar */}
       {selected.size > 0 && (
-        <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-muted/40 px-4 py-2">
-          <p className="text-sm text-foreground">
-            {t('selectedCount', { count: selected.size })}
-          </p>
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-muted/40 px-4 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm text-foreground">
+              {t('selectedCount', { count: selected.size })}
+            </p>
+            {allOnPageSelected && totalCount > selected.size && (
+              <button
+                type="button"
+                onClick={selectAllMatching}
+                disabled={selectingAll}
+                className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
+              >
+                {selectingAll
+                  ? 'Selecting…'
+                  : `Select all ${totalCount.toLocaleString()} ${activeGroup ? `in "${activeGroup.name}"` : 'matching'}`}
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="ghost"
               size="sm"
@@ -513,6 +849,63 @@ export default function ContactsPage() {
             >
               {t('clearSelection')}
             </Button>
+            {canEdit && (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={groupBusy}
+                      className="border-border"
+                    />
+                  }
+                >
+                  {groupBusy ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <FolderPlus className="size-4" />
+                  )}
+                  Add to group
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="end"
+                  className="max-h-72 w-56 border-border bg-popover"
+                >
+                  {allTags.length === 0 ? (
+                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                      No groups yet — create one with the &quot;New group&quot; card.
+                    </p>
+                  ) : (
+                    allTags.map((tag) => (
+                      <DropdownMenuItem
+                        key={tag.id}
+                        onClick={() => addSelectedToGroup(tag.id)}
+                        className="text-popover-foreground"
+                      >
+                        <span
+                          className="size-2.5 shrink-0 rounded-full"
+                          style={{ backgroundColor: tag.color }}
+                        />
+                        <span className="truncate">{tag.name}</span>
+                      </DropdownMenuItem>
+                    ))
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+            {canEdit && activeGroup && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={groupBusy}
+                onClick={() => removeSelectedFromGroup(activeGroup.id)}
+                className="border-border"
+              >
+                <FolderMinus className="size-4" />
+                Remove from group
+              </Button>
+            )}
             <GatedButton
               variant="destructive"
               size="sm"
@@ -738,10 +1131,22 @@ export default function ContactsPage() {
         onSaved={() => {
           fetchContacts();
           fetchTags();
+          refreshGroups();
+          scanPhones();
         }}
         onViewExisting={(id) => {
           setFormOpen(false);
           openDetail(id);
+        }}
+      />
+
+      <FixPhoneNumbersDialog
+        open={fixPhonesOpen}
+        onOpenChange={setFixPhonesOpen}
+        candidates={phoneRepairs}
+        onFixed={() => {
+          scanPhones();
+          fetchContacts();
         }}
       />
 
@@ -757,7 +1162,14 @@ export default function ContactsPage() {
       <ImportModal
         open={importOpen}
         onOpenChange={setImportOpen}
-        onImported={fetchContacts}
+        defaultGroupTagId={activeGroupId}
+        onImported={() => {
+          fetchContacts();
+          // An import may have created new groups (tags).
+          fetchTags();
+          refreshGroups();
+          scanPhones();
+        }}
       />
 
       {/* Custom Fields Manager (admin+) */}

@@ -31,6 +31,7 @@ import {
   isValidE164,
   normalizePhone,
   sanitizePhoneForMeta,
+  fixDoubledCountryCode,
 } from './phone-utils'
 
 /** The `contacts[]` entry Meta pairs with an inbound message. */
@@ -187,7 +188,9 @@ export function resolveContactSendTarget(contact: {
   phone?: string | null
   wa_user_id?: string | null
 } | null | undefined): WaSendTarget | null {
-  const sanitized = sanitizePhoneForMeta(contact?.phone ?? '')
+  const digits = sanitizePhoneForMeta(contact?.phone ?? '')
+  // "+91 91 98765 43210" (country code typed twice) is undeliverable.
+  const sanitized = fixDoubledCountryCode(digits) ?? digits
   if (isValidE164(sanitized)) return { target: sanitized, isPhone: true }
 
   const waUserId = contact?.wa_user_id?.trim()

@@ -192,6 +192,14 @@ export interface Conversation {
   ai_autoreply_disabled?: boolean;
   ai_reply_count?: number;
   ai_handoff_summary?: string | null;
+  /**
+   * Who sent the conversation's latest message, and when. Not columns:
+   * the inbox list derives them from an embedded latest message (see
+   * INBOX_CONVERSATION_SELECT) and keeps them current from realtime
+   * message inserts. Drive "Awaiting reply" and the waiting-longest sort.
+   */
+  last_sender?: SenderType | null;
+  last_sender_at?: string | null;
 }
 
 // ============================================================

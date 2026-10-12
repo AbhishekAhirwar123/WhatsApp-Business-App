@@ -241,7 +241,8 @@ export function MessageThread({
       .reverse()
       .find((m) => m.sender_type === "customer");
 
-    if (!lastCustomerMsg) return { expired: true, remaining: tTimer("noCustomerMessages") };
+    // Business-started chat: not an error, just waiting for the first reply.
+    if (!lastCustomerMsg) return { expired: true, awaiting: true, remaining: tTimer("noCustomerMessages") };
 
     const hoursSince = differenceInHours(new Date(), new Date(lastCustomerMsg.created_at));
     const expired = hoursSince >= 24;
@@ -933,7 +934,11 @@ export function MessageThread({
             variant="outline"
             className={cn(
               "ml-1 hidden gap-1 border-border text-[10px] sm:inline-flex sm:ml-2",
-              sessionInfo.expired ? "text-red-400" : "text-primary"
+              "awaiting" in sessionInfo
+                ? "text-amber-500"
+                : sessionInfo.expired
+                  ? "text-red-400"
+                  : "text-primary"
             )}
           >
             <Clock className="h-3 w-3" />

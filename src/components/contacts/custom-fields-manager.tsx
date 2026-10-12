@@ -14,8 +14,23 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Loader2, Plus, Trash2 } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  List,
+  Loader2,
+  Plus,
+  Trash2,
+  Type,
+} from 'lucide-react';
 import { useTranslations } from 'next-intl';
+import { cn } from '@/lib/utils';
+import {
+  getFieldOptions,
+  isDropdownField,
+  parseOptionsInput,
+  type CustomFieldType,
+} from '@/lib/contacts/custom-field-options';
 
 interface CustomFieldsManagerProps {
   open: boolean;
@@ -48,11 +63,19 @@ export function CustomFieldsManager({
   );
 }
 
+const OPTIONS_PLACEHOLDER = [
+  'One option per line, e.g.',
+  'Hot - 60 Days',
+  'Warm - 120 Days',
+  'Cold - Above 6 Months',
+].join('\n');
+
 /**
  * Create / rename / delete account-wide custom contact field definitions.
- * Per-contact values are edited elsewhere (contact detail → Custom Fields);
- * this only manages the field catalogue. Admin+ gated by the caller — the
- * `custom_fields` RLS also rejects non-admin writes as defense in depth.
+ * Fields are either free text or a dropdown with fixed options (e.g. "Lead
+ * Status"). Per-contact values are edited elsewhere (contact detail, inbox
+ * side panel); this only manages the field catalogue. Admin+ gated by the
+ * caller — the `custom_fields` RLS also rejects non-admin writes.
  */
 export function CustomFieldsPanel() {
   const t = useTranslations('Contacts.customFields');
@@ -62,6 +85,8 @@ export function CustomFieldsPanel() {
   const [fields, setFields] = useState<CustomField[]>([]);
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
+  const [newType, setNewType] = useState<CustomFieldType>('text');
+  const [newOptions, setNewOptions] = useState('');
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -105,11 +130,17 @@ export function CustomFieldsPanel() {
       toast.error(t('toastDuplicate', { name }));
       return;
     }
+    const options = parseOptionsInput(newOptions);
+    if (newType === 'select' && options.length === 0) {
+      toast.error('Add at least one option for a dropdown field.');
+      return;
+    }
 
     setCreating(true);
     const { error } = await supabase.from('custom_fields').insert({
       field_name: name,
-      field_type: 'text',
+      field_type: newType,
+      field_options: newType === 'select' ? { options } : null,
       user_id: user.id,
       account_id: accountId,
     });
@@ -121,6 +152,8 @@ export function CustomFieldsPanel() {
     }
     toast.success(t('toastCreated', { name }));
     setNewName('');
+    setNewOptions('');
+    setNewType('text');
     await fetchFields();
   }
 
@@ -150,6 +183,29 @@ export function CustomFieldsPanel() {
     return true;
   }
 
+  async function handleOptionsSave(
+    field: CustomField,
+    options: string[],
+  ): Promise<boolean> {
+    if (options.length === 0) {
+      toast.error('A dropdown needs at least one option.');
+      return false;
+    }
+    setBusyId(field.id);
+    const { error } = await supabase
+      .from('custom_fields')
+      .update({ field_options: { ...(field.field_options ?? {}), options } })
+      .eq('id', field.id);
+    setBusyId(null);
+    if (error) {
+      toast.error(`Could not save options: ${error.message}`);
+      return false;
+    }
+    toast.success('Options saved');
+    await fetchFields();
+    return true;
+  }
+
   async function handleDelete(field: CustomField) {
     if (
       !window.confirm(
@@ -175,31 +231,65 @@ export function CustomFieldsPanel() {
   return (
     <div className="space-y-4">
       {/* Create */}
-      <div className="flex items-center gap-2">
-        <Input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              void handleCreate();
-            }
-          }}
-          placeholder={t('fieldName')}
-          className="bg-muted text-foreground"
-        />
-        <Button
-          onClick={handleCreate}
-          disabled={creating || !newName.trim()}
-          className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0"
-        >
-          {creating ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <Plus className="size-4" />
-          )}
-          {t('addField')}
-        </Button>
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <Input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && newType === 'text') {
+                e.preventDefault();
+                void handleCreate();
+              }
+            }}
+            placeholder={t('fieldName')}
+            className="bg-muted text-foreground"
+          />
+          <Button
+            onClick={handleCreate}
+            disabled={creating || !newName.trim()}
+            className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0"
+          >
+            {creating ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Plus className="size-4" />
+            )}
+            {t('addField')}
+          </Button>
+        </div>
+        <div className="flex gap-1 rounded-lg bg-muted p-1 text-xs">
+          {(
+            [
+              ['text', 'Text', Type],
+              ['select', 'Dropdown', List],
+            ] as const
+          ).map(([value, label, Icon]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setNewType(value)}
+              className={cn(
+                'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors',
+                newType === value
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              <Icon className="size-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+        {newType === 'select' && (
+          <textarea
+            value={newOptions}
+            onChange={(e) => setNewOptions(e.target.value)}
+            rows={4}
+            placeholder={OPTIONS_PLACEHOLDER}
+            className="w-full resize-none rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary"
+          />
+        )}
       </div>
 
       {/* List */}
@@ -222,6 +312,7 @@ export function CustomFieldsPanel() {
                 busy={busyId === field.id}
                 onRename={handleRename}
                 onDelete={handleDelete}
+                onOptionsSave={handleOptionsSave}
               />
             ))}
           </ul>
@@ -238,14 +329,22 @@ function FieldRow({
   busy,
   onRename,
   onDelete,
+  onOptionsSave,
 }: {
   field: CustomField;
   busy: boolean;
   onRename: (field: CustomField, name: string) => Promise<boolean>;
   onDelete: (field: CustomField) => void;
+  onOptionsSave: (field: CustomField, options: string[]) => Promise<boolean>;
 }) {
   const t = useTranslations('Contacts.customFields');
   const [name, setName] = useState(field.field_name);
+  const dropdown = isDropdownField(field);
+  const optionCount = getFieldOptions(field).length;
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [optionsText, setOptionsText] = useState(() =>
+    getFieldOptions(field).join('\n'),
+  );
 
   async function commit() {
     if (name.trim() === field.field_name) {
@@ -257,32 +356,79 @@ function FieldRow({
   }
 
   return (
-    <li className="flex items-center gap-2 px-3 py-2">
-      <Input
-        value={name}
-        disabled={busy}
-        onChange={(e) => setName(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') e.currentTarget.blur();
-        }}
-        aria-label={t('renameAria', { name: field.field_name })}
-        className="focus:border-primary h-8 border-transparent bg-transparent text-foreground hover:border-border"
-      />
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        disabled={busy}
-        onClick={() => onDelete(field)}
-        title={t('deleteTitle')}
-        className="shrink-0 text-muted-foreground hover:text-red-400"
-      >
-        {busy ? (
-          <Loader2 className="size-4 animate-spin" />
+    <li className="px-3 py-2">
+      <div className="flex items-center gap-2">
+        <Input
+          value={name}
+          disabled={busy}
+          onChange={(e) => setName(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') e.currentTarget.blur();
+          }}
+          aria-label={t('renameAria', { name: field.field_name })}
+          className="focus:border-primary h-8 border-transparent bg-transparent text-foreground hover:border-border"
+        />
+        {dropdown ? (
+          <button
+            type="button"
+            onClick={() => setOptionsOpen((o) => !o)}
+            title="Edit dropdown options"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            <List className="size-3" />
+            {optionCount} options
+            {optionsOpen ? (
+              <ChevronUp className="size-3" />
+            ) : (
+              <ChevronDown className="size-3" />
+            )}
+          </button>
         ) : (
-          <Trash2 className="size-4" />
+          <span className="shrink-0 rounded-md bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+            Text
+          </span>
         )}
-      </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={busy}
+          onClick={() => onDelete(field)}
+          title={t('deleteTitle')}
+          className="shrink-0 text-muted-foreground hover:text-red-400"
+        >
+          {busy ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Trash2 className="size-4" />
+          )}
+        </Button>
+      </div>
+
+      {dropdown && optionsOpen && (
+        <div className="mt-2 space-y-2">
+          <textarea
+            value={optionsText}
+            onChange={(e) => setOptionsText(e.target.value)}
+            rows={Math.min(8, Math.max(3, optionsText.split('\n').length + 1))}
+            placeholder="One option per line"
+            className="w-full resize-none rounded-md border border-border bg-muted px-3 py-2 text-sm text-foreground outline-none focus:border-primary"
+          />
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={async () => {
+                const ok = await onOptionsSave(field, parseOptionsInput(optionsText));
+                if (ok) setOptionsOpen(false);
+              }}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              Save options
+            </Button>
+          </div>
+        </div>
+      )}
     </li>
   );
 }

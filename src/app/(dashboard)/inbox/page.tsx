@@ -5,7 +5,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { createClient } from "@/lib/supabase/client";
 import {
-  CONVERSATION_SELECT,
+  INBOX_CONVERSATION_SELECT,
+  LATEST_MESSAGE_EMBED,
+  withLastSender,
   normalizeConversation,
 } from "@/lib/inbox/conversations";
 import type { Conversation, Message, Contact, ConversationStatus } from "@/types";
@@ -13,6 +15,8 @@ import { useRealtime } from "@/hooks/use-realtime";
 import { ConversationList } from "@/components/inbox/conversation-list";
 import { MessageThread } from "@/components/inbox/message-thread";
 import { ContactSidebar } from "@/components/inbox/contact-sidebar";
+import { NewConversationDialog } from "@/components/inbox/new-conversation-dialog";
+import { useCan } from "@/hooks/use-can";
 import { toast } from "sonner";
 import { WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -135,7 +139,9 @@ function InboxPageInner() {
       const supabase = createClient();
       const { data, error } = await supabase
         .from("conversations")
-        .select(CONVERSATION_SELECT)
+        .select(INBOX_CONVERSATION_SELECT)
+        .order("created_at", { referencedTable: LATEST_MESSAGE_EMBED, ascending: false })
+        .limit(1, { referencedTable: LATEST_MESSAGE_EMBED })
         .eq("id", convId)
         .maybeSingle();
       if (error) {
@@ -150,7 +156,7 @@ function InboxPageInner() {
         return;
       }
       if (!data) return;
-      const fetched = normalizeConversation(data);
+      const fetched = withLastSender(normalizeConversation(data));
       setConversations((prev) => {
         const existing = prev.find((c) => c.id === fetched.id);
         if (existing) {
@@ -246,6 +252,9 @@ function InboxPageInner() {
                 ? {
                     ...c,
                     last_message_text: newMsg.content_text ?? "",
+                    // Keeps "Awaiting reply" / waiting-longest sort live.
+                    last_sender: newMsg.sender_type,
+                    last_sender_at: newMsg.created_at,
                     last_message_at: newMsg.created_at,
                     unread_count:
                       activeConversation?.id === newMsg.conversation_id
@@ -488,6 +497,34 @@ function InboxPageInner() {
     [activeConversation?.id, router]
   );
 
+  // "New conversation" — once the dialog has a thread (existing, or just
+  // created by the first template send), load it with its contact joined,
+  // make sure it is in the list, and open it.
+  const [newConvOpen, setNewConvOpen] = useState(false);
+  const canSend = useCan("send-messages");
+  const handleConversationStarted = useCallback(
+    async (convId: string) => {
+      const supabase = createClient();
+      const { data, error } = await supabase
+        .from("conversations")
+        .select(INBOX_CONVERSATION_SELECT)
+        .order("created_at", { referencedTable: LATEST_MESSAGE_EMBED, ascending: false })
+        .limit(1, { referencedTable: LATEST_MESSAGE_EMBED })
+        .eq("id", convId)
+        .maybeSingle();
+      if (error || !data) {
+        toast.error("Conversation created, but it could not be opened. Refresh the inbox.");
+        return;
+      }
+      const conv = withLastSender(normalizeConversation(data));
+      setConversations((prev) =>
+        prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev],
+      );
+      handleSelectConversation(conv);
+    },
+    [handleSelectConversation],
+  );
+
   // Mobile "back" — deselect the conversation so the list pane comes
   // back. Also clears the ?c= param so a refresh lands on the list
   // instead of re-opening the thread the user just backed out of.
@@ -532,6 +569,31 @@ function InboxPageInner() {
       }
     },
     [activeConversation]
+  );
+
+  // Bulk actions from the conversation list (mark done / read, assign…).
+  const handleBulkUpdate = useCallback(
+    (ids: string[], patch: Partial<Conversation>) => {
+      const idSet = new Set(ids);
+      setConversations((prev) =>
+        prev.map((c) => (idSet.has(c.id) ? { ...c, ...patch } : c)),
+      );
+      setActiveConversation((prev) =>
+        prev && idSet.has(prev.id) ? { ...prev, ...patch } : prev,
+      );
+    },
+    [],
+  );
+
+  const handleBulkDelete = useCallback(
+    (ids: string[]) => {
+      const idSet = new Set(ids);
+      setConversations((prev) => prev.filter((c) => !idSet.has(c.id)));
+      if (activeConversation && idSet.has(activeConversation.id)) {
+        handleCloseConversation();
+      }
+    },
+    [activeConversation, handleCloseConversation],
   );
 
   const handleAssignChange = useCallback(
@@ -590,6 +652,15 @@ function InboxPageInner() {
             conversations={conversations}
             onConversationsLoaded={handleConversationsLoaded}
             resyncToken={resyncToken}
+            onNewConversation={canSend ? () => setNewConvOpen(true) : undefined}
+            onBulkUpdate={handleBulkUpdate}
+            onBulkDelete={handleBulkDelete}
+            onRefresh={handleManualRefresh}
+          />
+          <NewConversationDialog
+            open={newConvOpen}
+            onOpenChange={setNewConvOpen}
+            onStarted={handleConversationStarted}
           />
         </div>
 

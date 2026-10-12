@@ -8,6 +8,15 @@ import {
   batchRetryDelayMs,
 } from '@/lib/broadcast-retry';
 import { normalizeKey } from '@/lib/contacts/dedupe';
+import {
+  fetchAllPages,
+  fetchContactsByIds,
+  resolveCustomFieldContactIds,
+} from '@/lib/broadcast-audience';
+import {
+  assignImportedContactTags,
+  resolveImportTagIds,
+} from '@/lib/contacts/resolve-import-tags';
 import { Contact, MessageTemplate } from '@/types';
 
 export type CustomFieldOperator = 'is' | 'is_not' | 'contains';
@@ -23,6 +32,8 @@ export interface AudienceConfig {
   tagIds?: string[];
   customField?: CustomFieldFilter;
   csvContacts?: { phone: string; name?: string }[];
+  /** When set, CSV contacts are also tagged with this group name. */
+  csvGroupName?: string;
   /** Contacts carrying any of these tags are subtracted from the result. */
   excludeTagIds?: string[];
 }
@@ -158,7 +169,7 @@ async function fetchCustomValueIndex(
 }
 
 export function useBroadcastSending(): UseBroadcastSendingReturn {
-  const { accountId } = useAuth();
+  const { accountId, canEditSettings } = useAuth();
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
 
@@ -167,48 +178,70 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
     let contacts: Contact[] = [];
 
+    // Every read below is paged: PostgREST caps a response at 1000 rows,
+    // so an unpaged read silently dropped everyone past the first 1000.
     if (audience.type === 'all') {
-      const { data, error } = await supabase.from('contacts').select('*');
-      if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
-      contacts = data ?? [];
+      try {
+        contacts = await fetchAllPages<Contact>((from, to) =>
+          supabase.from('contacts').select('*').order('id').range(from, to),
+        );
+      } catch (err) {
+        throw new Error(
+          `Failed to fetch contacts: ${err instanceof Error ? err.message : err}`,
+        );
+      }
     } else if (
       audience.type === 'tags' &&
       audience.tagIds &&
       audience.tagIds.length > 0
     ) {
-      const { data: contactTags, error: tagError } = await supabase
-        .from('contact_tags')
-        .select('contact_id')
-        .in('tag_id', audience.tagIds);
-
-      if (tagError)
-        throw new Error(`Failed to fetch contact tags: ${tagError.message}`);
-
-      if (contactTags && contactTags.length > 0) {
-        const uniqueContactIds = [
-          ...new Set(contactTags.map((ct) => ct.contact_id)),
-        ];
-        const { data, error } = await supabase
-          .from('contacts')
-          .select('*')
-          .in('id', uniqueContactIds);
-        if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
-        contacts = data ?? [];
+      const tagIds = audience.tagIds;
+      let contactTags: { contact_id: string }[];
+      try {
+        contactTags = await fetchAllPages<{ contact_id: string }>((from, to) =>
+          supabase
+            .from('contact_tags')
+            .select('contact_id')
+            .in('tag_id', tagIds)
+            .order('id')
+            .range(from, to),
+        );
+      } catch (err) {
+        throw new Error(
+          `Failed to fetch contact tags: ${err instanceof Error ? err.message : err}`,
+        );
       }
+      const uniqueContactIds = [
+        ...new Set(contactTags.map((ct) => ct.contact_id)),
+      ];
+      contacts = await fetchContactsByIds<Contact>(supabase, uniqueContactIds);
     } else if (audience.type === 'custom_field' && audience.customField) {
       contacts = await resolveCustomFieldAudience(supabase, audience.customField);
     } else if (audience.type === 'csv' && audience.csvContacts) {
       contacts = await upsertCsvContacts(supabase, audience.csvContacts);
+      if (audience.csvGroupName?.trim() && contacts.length > 0) {
+        await addCsvContactsToGroup(
+          supabase,
+          contacts.map((c) => c.id),
+          audience.csvGroupName.trim(),
+        );
+      }
     }
 
     // Apply exclude tags (works across all contact-derived audience
     // types). CSV contacts are synthetic so exclusion doesn't apply.
     if (audience.excludeTagIds && audience.excludeTagIds.length > 0) {
-      const { data: excludeRows } = await supabase
-        .from('contact_tags')
-        .select('contact_id')
-        .in('tag_id', audience.excludeTagIds);
-      const excludedIds = new Set((excludeRows ?? []).map((r) => r.contact_id));
+      const excludeTagIds = audience.excludeTagIds;
+      const excludeRows = await fetchAllPages<{ contact_id: string }>(
+        (from, to) =>
+          supabase
+            .from('contact_tags')
+            .select('contact_id')
+            .in('tag_id', excludeTagIds)
+            .order('id')
+            .range(from, to),
+      );
+      const excludedIds = new Set(excludeRows.map((r) => r.contact_id));
       contacts = contacts.filter((c) => !excludedIds.has(c.id));
     }
 
@@ -311,37 +344,55 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       .filter((c): c is Contact => Boolean(c));
   }
 
+  /**
+   * "Save these contacts as a group" on the CSV audience: tag every CSV
+   * contact with `groupName` (created if missing) so the list shows up as
+   * its own group card on the Contacts page and can be reused later.
+   * Best-effort — a tagging failure must not block the broadcast.
+   */
+  async function addCsvContactsToGroup(
+    supabase: ReturnType<typeof createClient>,
+    contactIds: string[],
+    groupName: string,
+  ): Promise<void> {
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session?.user || !accountId) return;
+      const { tagIdByKey } = await resolveImportTagIds(supabase, {
+        accountId,
+        userId: session.user.id,
+        tagNames: [groupName],
+        canCreateTags: canEditSettings,
+      });
+      await assignImportedContactTags(
+        supabase,
+        contactIds.map((contactId) => ({ contactId, tagNames: [groupName] })),
+        tagIdByKey,
+      );
+    } catch (err) {
+      console.error('[broadcast] failed to save CSV contacts as group', err);
+    }
+  }
+
   async function resolveCustomFieldAudience(
     supabase: ReturnType<typeof createClient>,
     filter: CustomFieldFilter,
   ): Promise<Contact[]> {
-    const { fieldId, operator, value } = filter;
-
-    // Build the WHERE clause for the operator. PostgREST supports
-    // eq/neq/ilike via the query builder — use ilike with wildcards
-    // for "contains" so the match is case-insensitive.
-    let query = supabase
-      .from('contact_custom_values')
-      .select('contact_id')
-      .eq('custom_field_id', fieldId);
-
-    if (operator === 'is') query = query.eq('value', value);
-    else if (operator === 'is_not') query = query.neq('value', value);
-    else if (operator === 'contains') query = query.ilike('value', `%${value}%`);
-
-    const { data: matches, error: matchErr } = await query;
-    if (matchErr)
-      throw new Error(`Custom-field filter failed: ${matchErr.message}`);
-
-    const contactIds = [...new Set((matches ?? []).map((m) => m.contact_id))];
+    // Case-insensitive matching, and `is_not` includes contacts with no
+    // value — see lib/broadcast-audience for the rules. The step-2
+    // estimate uses the same resolver, so its count matches the send.
+    let contactIds: string[];
+    try {
+      contactIds = await resolveCustomFieldContactIds(supabase, filter);
+    } catch (err) {
+      throw new Error(
+        `Custom-field filter failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
     if (contactIds.length === 0) return [];
-
-    const { data, error } = await supabase
-      .from('contacts')
-      .select('*')
-      .in('id', contactIds);
-    if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
-    return data ?? [];
+    return fetchContactsByIds<Contact>(supabase, contactIds);
   }
 
   async function createAndSendBroadcast(payload: BroadcastPayload): Promise<string> {
