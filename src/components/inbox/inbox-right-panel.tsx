@@ -152,7 +152,7 @@ function CallsTab() {
       </p>
       {canAdmin ? (
         <a
-          href="https://developers.facebook.com/docs/whatsapp/cloud-api/calling"
+          href="https://developers.facebook.com/documentation/business-messaging/whatsapp/calling"
           target="_blank"
           rel="noreferrer"
           className="text-xs text-primary hover:underline"

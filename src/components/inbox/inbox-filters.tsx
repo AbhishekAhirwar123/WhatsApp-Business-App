@@ -228,7 +228,7 @@ export function InboxFiltersPanel({
                 </span>
                 <span
                   className="flex cursor-not-allowed items-center justify-center gap-1.5 rounded-md py-1.5 text-muted-foreground/60"
-                  title="WhatsApp group chats are not available on this WhatsApp Cloud API connection."
+                  title="WhatsApp group chats need Meta's Groups API (Official Business Accounts only) and aren't integrated in WACRM yet."
                   aria-disabled="true"
                 >
                   <Users className="h-3.5 w-3.5" />
