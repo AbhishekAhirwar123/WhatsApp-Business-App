@@ -15,11 +15,16 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
+  Archive,
+  ArchiveRestore,
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   ChevronUp,
   List,
   Loader2,
   Plus,
+  Sparkles,
   Trash2,
   Type,
 } from 'lucide-react';
@@ -63,6 +68,41 @@ export function CustomFieldsManager({
   );
 }
 
+/** Stable machine key from a label: "Lead Status" → "lead_status". */
+export function fieldKeyFor(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 50) || 'field'
+  );
+}
+
+/**
+ * Suggested fields from the Neoteric inbox reference. Editable after
+ * creation; added only if no field with the same key or name exists
+ * (idempotent — never touches existing definitions). Contact Owner is a
+ * built-in member field on the contact, not a custom field. Sub-Channel's
+ * options were not established, so it starts as free text.
+ */
+const SUGGESTED_FIELDS: { key: string; name: string; type: CustomFieldType; options?: string[] }[] = [
+  {
+    key: 'lead_status',
+    name: 'Lead Status',
+    type: 'select',
+    options: ['Hot - 60 Days', 'Warm - 120 Days', 'Cold - Above 6 Months', 'Available', 'Invalid - Not Interested'],
+  },
+  {
+    key: 'lead_source',
+    name: 'Lead Source',
+    type: 'select',
+    options: ['YouTube', 'Newspaper', 'Double tick', 'BPO', 'Interact with Social Media'],
+  },
+  { key: 'sub_channel', name: 'Sub-Channel', type: 'text' },
+];
+
 const OPTIONS_PLACEHOLDER = [
   'One option per line, e.g.',
   'Hot - 60 Days',
@@ -96,6 +136,7 @@ export function CustomFieldsPanel() {
     const { data } = await supabase
       .from('custom_fields')
       .select('*')
+      .order('sort_order')
       .order('field_name');
     setFields((data as CustomField[] | null) ?? []);
     setLoading(false);
@@ -141,6 +182,8 @@ export function CustomFieldsPanel() {
       field_name: name,
       field_type: newType,
       field_options: newType === 'select' ? { options } : null,
+      field_key: uniqueKey(fieldKeyFor(name)),
+      sort_order: fields.length,
       user_id: user.id,
       account_id: accountId,
     });
@@ -204,6 +247,69 @@ export function CustomFieldsPanel() {
     toast.success('Options saved');
     await fetchFields();
     return true;
+  }
+
+  /** A key not used by another field of this account. */
+  function uniqueKey(base: string): string {
+    const taken = new Set(fields.map((f) => f.field_key).filter(Boolean));
+    let key = base;
+    for (let i = 2; taken.has(key); i++) key = `${base}_${i}`;
+    return key;
+  }
+
+  async function patchField(field: CustomField, patch: Partial<CustomField>, okMsg?: string) {
+    setBusyId(field.id);
+    const { error } = await supabase.from('custom_fields').update(patch).eq('id', field.id);
+    setBusyId(null);
+    if (error) {
+      toast.error(error.message);
+      return;
+    }
+    if (okMsg) toast.success(okMsg);
+    await fetchFields();
+  }
+
+  async function move(index: number, dir: -1 | 1) {
+    const a = fields[index];
+    const b = fields[index + dir];
+    if (!a || !b) return;
+    await Promise.all([
+      supabase.from('custom_fields').update({ sort_order: index + dir }).eq('id', a.id),
+      supabase.from('custom_fields').update({ sort_order: index }).eq('id', b.id),
+    ]);
+    await fetchFields();
+  }
+
+  async function addSuggested() {
+    if (!accountId || !user) return;
+    const existingKeys = new Set(fields.map((f) => f.field_key));
+    const existingNames = new Set(fields.map((f) => f.field_name.toLowerCase()));
+    const missing = SUGGESTED_FIELDS.filter(
+      (f) => !existingKeys.has(f.key) && !existingNames.has(f.name.toLowerCase()),
+    );
+    if (missing.length === 0) {
+      toast.info('The suggested fields already exist.');
+      return;
+    }
+    setCreating(true);
+    const { error } = await supabase.from('custom_fields').insert(
+      missing.map((f, i) => ({
+        field_name: f.name,
+        field_key: f.key,
+        field_type: f.type,
+        field_options: f.options ? { options: f.options } : null,
+        sort_order: fields.length + i,
+        user_id: user.id,
+        account_id: accountId,
+      })),
+    );
+    setCreating(false);
+    if (error) {
+      toast.error(`Could not add fields: ${error.message}`);
+      return;
+    }
+    toast.success(`Added ${missing.map((f) => f.name).join(', ')}`);
+    await fetchFields();
   }
 
   async function handleDelete(field: CustomField) {
@@ -292,6 +398,16 @@ export function CustomFieldsPanel() {
         )}
       </div>
 
+      <button
+        type="button"
+        onClick={addSuggested}
+        disabled={creating}
+        className="flex items-center gap-1.5 text-xs text-primary hover:underline disabled:opacity-50"
+      >
+        <Sparkles className="size-3.5" />
+        Add suggested fields (Lead Status, Lead Source, Sub-Channel)
+      </button>
+
       {/* List */}
       <div className="max-h-72 overflow-y-auto rounded-md border border-border">
         {loading ? (
@@ -305,8 +421,12 @@ export function CustomFieldsPanel() {
           </p>
         ) : (
           <ul className="divide-y divide-border">
-            {fields.map((field) => (
+            {fields.map((field, index) => (
               <FieldRow
+                index={index}
+                count={fields.length}
+                onMove={move}
+                onPatch={patchField}
                 key={field.id}
                 field={field}
                 busy={busyId === field.id}
@@ -325,6 +445,10 @@ export function CustomFieldsPanel() {
 /** A single editable row. Controlled local state lets us commit on blur /
  *  Enter and cleanly revert to the last saved name when a rename fails. */
 function FieldRow({
+  index,
+  count,
+  onMove,
+  onPatch,
   field,
   busy,
   onRename,
@@ -336,6 +460,10 @@ function FieldRow({
   onRename: (field: CustomField, name: string) => Promise<boolean>;
   onDelete: (field: CustomField) => void;
   onOptionsSave: (field: CustomField, options: string[]) => Promise<boolean>;
+  index: number;
+  count: number;
+  onMove: (index: number, dir: -1 | 1) => void;
+  onPatch: (field: CustomField, patch: Partial<CustomField>, okMsg?: string) => void;
 }) {
   const t = useTranslations('Contacts.customFields');
   const [name, setName] = useState(field.field_name);
@@ -369,6 +497,24 @@ function FieldRow({
           aria-label={t('renameAria', { name: field.field_name })}
           className="focus:border-primary h-8 border-transparent bg-transparent text-foreground hover:border-border"
         />
+        <button
+          type="button"
+          aria-label="Move up"
+          disabled={busy || index === 0}
+          onClick={() => onMove(index, -1)}
+          className="rounded p-0.5 text-muted-foreground hover:bg-muted disabled:opacity-30"
+        >
+          <ArrowUp className="size-3.5" />
+        </button>
+        <button
+          type="button"
+          aria-label="Move down"
+          disabled={busy || index === count - 1}
+          onClick={() => onMove(index, 1)}
+          className="rounded p-0.5 text-muted-foreground hover:bg-muted disabled:opacity-30"
+        >
+          <ArrowDown className="size-3.5" />
+        </button>
         {dropdown ? (
           <button
             type="button"
@@ -393,6 +539,23 @@ function FieldRow({
           variant="ghost"
           size="icon-sm"
           disabled={busy}
+          onClick={() =>
+            onPatch(
+              field,
+              { archived_at: field.archived_at ? null : new Date().toISOString() },
+              field.archived_at ? 'Field restored' : 'Field archived — values are kept, it is hidden from contacts and the inbox',
+            )
+          }
+          title={field.archived_at ? 'Restore field' : 'Archive field (keeps values)'}
+          aria-label={field.archived_at ? `Restore ${field.field_name}` : `Archive ${field.field_name}`}
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          {field.archived_at ? <ArchiveRestore className="size-4" /> : <Archive className="size-4" />}
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={busy}
           onClick={() => onDelete(field)}
           title={t('deleteTitle')}
           className="shrink-0 text-muted-foreground hover:text-red-400"
@@ -403,6 +566,21 @@ function FieldRow({
             <Trash2 className="size-4" />
           )}
         </Button>
+      </div>
+
+      <div className="mt-1 flex flex-wrap items-center gap-3 pl-1 text-[11px] text-muted-foreground">
+        {field.field_key && <span className="font-mono">key: {field.field_key}</span>}
+        {field.archived_at && <span className="rounded bg-muted px-1.5">archived</span>}
+        <label className="flex items-center gap-1">
+          <input
+            type="checkbox"
+            className="accent-primary"
+            disabled={busy}
+            checked={!!field.required}
+            onChange={(e) => onPatch(field, { required: e.target.checked })}
+          />
+          Required
+        </label>
       </div>
 
       {dropdown && optionsOpen && (

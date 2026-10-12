@@ -148,7 +148,7 @@ export function Step2SelectAudience({
           .from('custom_fields')
           .select('*')
           .order('field_name');
-        setCustomFields(data ?? []);
+        setCustomFields(((data as CustomField[] | null) ?? []).filter((f) => !f.archived_at));
       } finally {
         setLoadingFields(false);
       }

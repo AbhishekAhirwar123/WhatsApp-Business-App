@@ -102,7 +102,7 @@ export function Step3Personalize({
       ]);
       if (cancelled) return;
 
-      setCustomFields(fieldsRes.data ?? []);
+      setCustomFields(((fieldsRes.data as CustomField[] | null) ?? []).filter((f) => !f.archived_at));
       setLoadingFields(false);
 
       const contact = contactRes.data ?? null;

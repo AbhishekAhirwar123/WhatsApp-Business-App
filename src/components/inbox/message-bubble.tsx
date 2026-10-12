@@ -38,6 +38,10 @@ interface MessageBubbleProps {
    * stays inline and non-clickable.
    */
   onOpenMedia?: (messageId: string) => void;
+  /** Who sent an outbound message ("Neha", "Bot"), shown by the time. */
+  senderLabel?: string | null;
+  /** Briefly ring the bubble after a jump-to-message from search. */
+  highlighted?: boolean;
 }
 
 /**
@@ -245,6 +249,8 @@ export function MessageBubble({
   currentUserId,
   onToggleReaction,
   onOpenMedia,
+  senderLabel,
+  highlighted,
 }: MessageBubbleProps) {
   const t = useTranslations("Inbox.bubble");
 
@@ -263,7 +269,8 @@ export function MessageBubble({
     >
       <div
         className={cn(
-          "relative rounded-2xl px-3 py-2",
+          "relative rounded-2xl px-3 py-2 transition-shadow",
+          highlighted && "ring-4 ring-amber-400/70",
           isAgent
             ? "rounded-br-md bg-primary text-primary-foreground"
             : "rounded-bl-md bg-muted text-foreground",
@@ -311,6 +318,7 @@ export function MessageBubble({
               isAgent ? "text-primary-foreground/70" : "text-muted-foreground",
             )}
           >
+            {senderLabel ? `${senderLabel} · ` : ""}
             {time}
           </span>
           {isAgent && <StatusIcon status={message.status} title={failure} />}

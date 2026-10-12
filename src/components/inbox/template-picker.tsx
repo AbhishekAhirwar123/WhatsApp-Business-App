@@ -87,6 +87,8 @@ export function TemplatePicker({
   const [params, setParams] = useState<string[]>([]);
   const [headerText, setHeaderText] = useState<string>("");
   const [buttonParams, setButtonParams] = useState<Record<number, string>>({});
+  const [query, setQuery] = useState("");
+  const [language, setLanguage] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -140,7 +142,11 @@ export function TemplatePicker({
   }
 
   function handleOpenChange(next: boolean) {
-    if (!next) resetSelection();
+    if (!next) {
+      resetSelection();
+      setQuery("");
+      setLanguage("");
+    }
     onOpenChange(next);
   }
 
@@ -178,6 +184,18 @@ export function TemplatePicker({
     () => (selected ? collectVariableSlots(selected) : null),
     [selected],
   );
+  const languages = useMemo(
+    () => [...new Set(templates.map((tpl) => tpl.language).filter(Boolean) as string[])].sort(),
+    [templates],
+  );
+  const shownTemplates = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return templates.filter(
+      (tpl) =>
+        (!language || tpl.language === language) &&
+        (!q || tpl.name.toLowerCase().includes(q) || (tpl.body_text ?? "").toLowerCase().includes(q)),
+    );
+  }, [templates, query, language]);
   const canConfirm =
     !!selected &&
     !!slots &&
@@ -202,6 +220,31 @@ export function TemplatePicker({
           </DialogDescription>
         </DialogHeader>
 
+        {!selected && templates.length > 0 && (
+          <div className="flex gap-2">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search templates"
+              aria-label="Search templates"
+              className="h-9 min-w-0 flex-1 rounded-md border border-border bg-muted px-3 text-sm text-popover-foreground outline-none focus:border-primary"
+            />
+            {languages.length > 1 && (
+              <select
+                value={language}
+                onChange={(e) => setLanguage(e.target.value)}
+                aria-label="Template language"
+                className="h-9 rounded-md border border-border bg-muted px-2 text-xs text-popover-foreground outline-none focus:border-primary"
+              >
+                <option value="">All languages</option>
+                {languages.map((l) => (
+                  <option key={l} value={l}>{l}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
         {!selected ? (
           <div className="max-h-[60vh] space-y-2 overflow-y-auto">
             {loading ? (
@@ -215,8 +258,10 @@ export function TemplatePicker({
                   {t("noApprovedTemplatesHint")}
                 </p>
               </div>
+            ) : shownTemplates.length === 0 ? (
+              <p className="py-6 text-center text-xs text-muted-foreground">No templates match.</p>
             ) : (
-              templates.map((t) => (
+              shownTemplates.map((t) => (
                 <button
                   key={t.id}
                   type="button"

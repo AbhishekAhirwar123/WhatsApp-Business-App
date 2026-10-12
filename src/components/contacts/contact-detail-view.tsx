@@ -167,7 +167,7 @@ export function ContactDetailView({
         .eq('contact_id', contactId),
     ]);
 
-    if (fieldsRes.data) setCustomFields(fieldsRes.data);
+    if (fieldsRes.data) setCustomFields((fieldsRes.data as CustomField[]).filter((f) => !f.archived_at));
     if (valuesRes.data) {
       const map: Record<string, string> = {};
       valuesRes.data.forEach((v) => {

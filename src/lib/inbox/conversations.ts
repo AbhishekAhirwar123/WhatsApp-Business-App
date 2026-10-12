@@ -81,12 +81,12 @@ export function matchesContactFilters(
  * {@link LATEST_MESSAGE_EMBED} ordering/limit so PostgREST returns one
  * message per conversation instead of the whole thread.
  */
-export const INBOX_CONVERSATION_SELECT = `${CONVERSATION_SELECT}, latest_message:messages(sender_type, created_at)`;
+export const INBOX_CONVERSATION_SELECT = `${CONVERSATION_SELECT}, latest_message:messages(sender_type, created_at, status)`;
 
 /** Alias of the embedded latest message — the `referencedTable` for order/limit. */
 export const LATEST_MESSAGE_EMBED = "latest_message";
 
-type LatestMessage = { sender_type: SenderType; created_at: string };
+type LatestMessage = { sender_type: SenderType; created_at: string; status?: string | null };
 
 /**
  * Lift the embedded latest message onto `last_sender` / `last_sender_at`.
@@ -106,6 +106,7 @@ export function withLastSender<T extends Conversation>(
     ...(rest as unknown as T),
     last_sender: latest?.sender_type ?? null,
     last_sender_at: latest?.created_at ?? null,
+    last_message_status: latest?.status ?? null,
   };
 }
 

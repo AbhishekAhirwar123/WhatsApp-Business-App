@@ -116,7 +116,7 @@ export function ImportModal({
         supabase.from('tags').select('*').order('name'),
       ]);
       if (cancelled) return;
-      setCustomFields((fieldsRes.data as CustomField[] | null) ?? []);
+      setCustomFields(((fieldsRes.data as CustomField[] | null) ?? []).filter((f) => !f.archived_at));
       setTags((tagsRes.data as Tag[] | null) ?? []);
     })();
     // Pre-select the group the user is currently viewing (if any).
