@@ -20,6 +20,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { BroadcastError, type BroadcastPlan } from '@/lib/whatsapp/broadcast-core';
 import { decrypt } from '@/lib/whatsapp/encryption';
+import { isMissingSchemaError } from '@/lib/db/schema-compat';
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
 import {
   sanitizePhoneForMeta,
@@ -178,21 +179,27 @@ export async function planBroadcastResume(
   }
 
   const statuses = scopeStatuses(scope);
-  const { data: rawRows, error: recError } = await db
-    .from('broadcast_recipients')
-    .select('id, template_params, contact:contacts(phone, blocked_at, opt_in_status)')
-    .eq('broadcast_id', broadcastId)
-    .in('status', statuses)
-    // Oldest first, so repeated capped passes chew through the backlog
-    // in a stable order instead of re-picking the same slice.
-    .order('created_at', { ascending: true });
+  const loadRecipients = (contactCols: string) =>
+    db
+      .from('broadcast_recipients')
+      .select(`id, template_params, contact:contacts(${contactCols})`)
+      .eq('broadcast_id', broadcastId)
+      .in('status', statuses)
+      // Oldest first, so repeated capped passes chew through the backlog
+      // in a stable order instead of re-picking the same slice.
+      .order('created_at', { ascending: true });
+  let { data: rawRows, error: recError } = await loadRecipients('phone, blocked_at, opt_in_status');
+  if (recError && isMissingSchemaError(recError)) {
+    // Migration 044 (block / opt-in columns) not applied yet.
+    ({ data: rawRows, error: recError } = await loadRecipients('phone'));
+  }
 
   if (recError) {
     console.error('[broadcast-resume] recipient load failed:', recError.message);
     throw new BroadcastError('internal', 'Failed to load recipients', 500);
   }
 
-  const rows = (rawRows ?? []) as RecipientRow[];
+  const rows = (rawRows ?? []) as unknown as RecipientRow[];
 
   // A recipient whose contact has no usable phone can never send. Stamp
   // it failed now: leaving it 'pending' would keep the broadcast in

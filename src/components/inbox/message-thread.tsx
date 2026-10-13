@@ -71,6 +71,7 @@ import { buildReplyPreview } from "./reply-quote";
 import { renderTemplateBody } from "@/lib/whatsapp/template-body";
 import { contactHandle } from "@/lib/whatsapp/wa-identity";
 import { toast } from "sonner";
+import { isMissingSchemaError } from "@/lib/db/schema-compat";
 
 interface ReplyDraft {
   id: string;
@@ -1135,12 +1136,21 @@ export function MessageThread({
       // other. The DB logs the change (actor, from, to) in
       // conversation_events.
       const expected = conversation.assigned_agent_id ?? null;
-      const { data, error } = await createClient().rpc("assign_conversation", {
+      const supabase = createClient();
+      let { data, error } = await supabase.rpc("assign_conversation", {
         p_conversation_id: conversation.id,
         p_assignee: agentId,
         p_expected_assignee: expected,
         p_check_expected: true,
       });
+      if (error && isMissingSchemaError(error)) {
+        // Migration 044 not applied: plain update (no race check / audit).
+        ({ error } = await supabase
+          .from("conversations")
+          .update({ assigned_agent_id: agentId })
+          .eq("id", conversation.id));
+        data = error ? null : { ok: true, assigned_agent_id: agentId };
+      }
 
       if (error) {
         console.error("Failed to update assignment:", error);

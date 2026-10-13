@@ -34,6 +34,7 @@ import {
 import { format, isToday, isYesterday } from "date-fns";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
+import { isMissingSchemaError } from "@/lib/db/schema-compat";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
@@ -237,6 +238,15 @@ export function ConversationList({
           p_conversation_id: id,
           p_read_through: now,
         });
+        if (error && isMissingSchemaError(error)) {
+          // Migration 044 not applied: clear the shared counter instead.
+          const { error: updErr } = await supabase
+            .from("conversations")
+            .update({ unread_count: 0 })
+            .in("id", ids);
+          if (updErr) throw updErr;
+          break;
+        }
         if (error) throw error;
       }
       onBulkUpdate(ids, { my_unread_count: 0 });
@@ -251,6 +261,15 @@ export function ConversationList({
           p_conversation_id: id,
           p_assignee: userId,
         });
+        if (error && isMissingSchemaError(error)) {
+          // Migration 044 not applied: plain update (no audit trail).
+          const { error: updErr } = await supabase
+            .from("conversations")
+            .update({ assigned_agent_id: userId })
+            .in("id", ids);
+          if (updErr) throw updErr;
+          break;
+        }
         if (error) throw error;
       }
       onBulkUpdate(ids, { assigned_agent_id: userId ?? undefined });

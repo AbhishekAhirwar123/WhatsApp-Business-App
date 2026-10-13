@@ -136,9 +136,14 @@ export function CustomFieldsPanel() {
     const { data } = await supabase
       .from('custom_fields')
       .select('*')
-      .order('sort_order')
       .order('field_name');
-    setFields((data as CustomField[] | null) ?? []);
+    // `sort_order` arrives with migration 044 — sort here so the list
+    // still loads on a database that hasn't been migrated yet.
+    setFields(
+      ((data as CustomField[] | null) ?? []).sort(
+        (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0),
+      ),
+    );
     setLoading(false);
   }, [supabase, accountId]);
 

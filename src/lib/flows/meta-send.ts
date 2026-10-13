@@ -14,6 +14,7 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
 import { assertContactNotBlocked, resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
+import { selectContactForSend } from '@/lib/contacts/send-contact'
 import { supabaseAdmin } from './admin-client'
 
 // ------------------------------------------------------------
@@ -90,12 +91,7 @@ export async function engineSendText(
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
 
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id, blocked_at')
-    .eq('id', args.contactId)
-    .eq('account_id', args.accountId)
-    .maybeSingle()
+  const { data: contact, error: contactErr } = await selectContactForSend(db, args.accountId, args.contactId)
   if (contactErr || !contact) {
     throw new Error('contact not found for this account')
   }
@@ -200,12 +196,7 @@ export async function engineSendMedia(
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
 
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id, blocked_at')
-    .eq('id', args.contactId)
-    .eq('account_id', args.accountId)
-    .maybeSingle()
+  const { data: contact, error: contactErr } = await selectContactForSend(db, args.accountId, args.contactId)
   if (contactErr || !contact) {
     throw new Error('contact not found for this account')
   }
@@ -352,12 +343,7 @@ async function sendInteractiveViaMeta(
   // Scope the contact + whatsapp_config lookups by account_id —
   // same defense-in-depth rationale as automations/meta-send.ts.
   // Migration 017 moved both tables to account-scoped tenancy.
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id, blocked_at')
-    .eq('id', input.contactId)
-    .eq('account_id', input.accountId)
-    .maybeSingle()
+  const { data: contact, error: contactErr } = await selectContactForSend(db, input.accountId, input.contactId)
   if (contactErr || !contact) {
     throw new Error('contact not found for this account')
   }

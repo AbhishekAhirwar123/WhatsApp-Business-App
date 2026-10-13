@@ -47,6 +47,7 @@ import { ViewTabs } from "@/components/inbox/view-tabs";
 import { NewConversationDialog } from "@/components/inbox/new-conversation-dialog";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { toast } from "sonner";
+import { MIGRATION_044_NOTICE, isMissingSchemaError } from "@/lib/db/schema-compat";
 import { Info, WifiOff, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -147,12 +148,17 @@ function InboxPageInner() {
       const [m, tg, cf] = await Promise.all([
         supabase.from("profiles").select("*").order("full_name"),
         supabase.from("tags").select("*").order("name"),
-        supabase.from("custom_fields").select("*").order("sort_order").order("field_name"),
+        // Sorted in the browser: `sort_order` only exists after migration 044.
+        supabase.from("custom_fields").select("*").order("field_name"),
       ]);
       if (cancelled) return;
       setMembers((m.data as Profile[] | null) ?? []);
       setTags(((tg.data as Tag[] | null) ?? []).filter((x) => !x.archived_at));
-      setCustomFields(((cf.data as CustomField[] | null) ?? []).filter((x) => !x.archived_at));
+      setCustomFields(
+        ((cf.data as CustomField[] | null) ?? [])
+          .filter((x) => !x.archived_at)
+          .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
+      );
     })();
     return () => {
       cancelled = true;
@@ -214,6 +220,8 @@ function InboxPageInner() {
   const [listError, setListError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [counts, setCounts] = useState<InboxCounts | null>(null);
+  // Migration 044 not applied yet: the list runs in basic mode.
+  const [basicMode, setBasicMode] = useState(false);
   const listSeq = useRef(0);
   const filtersKey = JSON.stringify([filters, sort]);
 
@@ -226,6 +234,7 @@ function InboxPageInner() {
       if (seq !== listSeq.current) return;
       setConversations(page.rows);
       setCursor(page.next);
+      setBasicMode(!!page.basic);
     } catch (err) {
       if (seq !== listSeq.current) return;
       setListError(err instanceof Error ? err.message : "Unknown error");
@@ -526,7 +535,9 @@ function InboxPageInner() {
       .rpc("mark_conversation_read", { p_conversation_id: convId, p_read_through: newest.created_at })
       .then(({ error }) => {
         if (error) {
-          console.error("mark read failed:", error.message);
+          // Basic mode (migration 044 missing): the thread's legacy shared
+          // counter reset still runs; nothing to log.
+          if (!isMissingSchemaError(error)) console.error("mark read failed:", error.message);
           return;
         }
         patchConversation(convId, { my_unread_count: 0 });
@@ -632,6 +643,16 @@ function InboxPageInner() {
         <div className="flex shrink-0 items-center justify-center gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2" role="status">
           <WifiOff className="h-4 w-4 text-amber-500" />
           <p className="text-xs text-amber-600 dark:text-amber-400">{t("whatsappNotConnected")}</p>
+        </div>
+      )}
+      {basicMode && (
+        <div className="flex shrink-0 items-center justify-center gap-2 border-b border-sky-500/20 bg-sky-500/10 px-4 py-2" role="status">
+          <Info className="h-4 w-4 shrink-0 text-sky-600 dark:text-sky-400" />
+          <p className="text-xs text-sky-700 dark:text-sky-300">
+            {canAdmin
+              ? MIGRATION_044_NOTICE
+              : "The inbox is running in basic mode until an admin applies a database update."}
+          </p>
         </div>
       )}
       {!isConnected && initialConnectDoneRef.current && (

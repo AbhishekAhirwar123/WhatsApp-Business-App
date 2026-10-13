@@ -41,6 +41,7 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
+import { isMissingSchemaError } from '@/lib/db/schema-compat';
 import type { MessageTemplate } from '@/types';
 import {
   resolveTemplateRow,
@@ -537,7 +538,11 @@ export async function sendMessageToConversation(
       .select('id')
       .single();
 
-    if (pendingErr) {
+    if (pendingErr && isMissingSchemaError(pendingErr)) {
+      // Migration 044 (client_message_id) not applied yet: fall back to
+      // the original insert-after-send path without idempotency.
+      console.warn('[send-message] outbox column missing — apply migration 044');
+    } else if (pendingErr) {
       if ((pendingErr as { code?: string }).code !== '23505') {
         throw new SendMessageError(
           'db_error',
@@ -563,7 +568,7 @@ export async function sendMessageToConversation(
         409,
       );
     }
-    pendingId = (pending as { id: string }).id;
+    pendingId = (pending as { id: string } | null)?.id ?? null;
   }
 
   // Send via Meta — retry across phone-number variants if Meta rejects

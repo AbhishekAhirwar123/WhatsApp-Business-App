@@ -42,6 +42,8 @@ interface Row extends Record<string, unknown> {
 function fakeDb(opts: {
   lastInboundAt: string | null;
   contact?: Record<string, unknown>;
+  /** Simulate a database without migration 044's outbox column. */
+  noOutboxColumn?: boolean;
 }) {
   const messages: Row[] = [];
   let seq = 0;
@@ -62,6 +64,9 @@ function fakeDb(opts: {
         if (table === 'whatsapp_config') return { data: config, error: null };
         if (table !== 'messages') return { data: null, error: null };
         if (op === 'insert') {
+          if (opts.noOutboxColumn && 'client_message_id' in payload) {
+            return { data: null, error: { code: 'PGRST204', message: "Could not find the 'client_message_id' column of 'messages' in the schema cache" } };
+          }
           const dup = payload.client_message_id &&
             messages.some((m) => m.conversation_id === payload.conversation_id &&
               m.client_message_id === payload.client_message_id);
@@ -196,5 +201,18 @@ describe('idempotent outbox (clientMessageId)', () => {
       }),
     ).rejects.toMatchObject({ code: 'duplicate_request', status: 409 });
     expect(sendTextMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('before migration 044 is applied', () => {
+  it('still sends (no idempotency) when the outbox column is missing', async () => {
+    const { db, messages } = fakeDb({ lastInboundAt: recent(), noOutboxColumn: true });
+    const res = await sendMessageToConversation(db, 'acct', {
+      conversationId: 'cv-1', messageType: 'text', contentText: 'hi', clientMessageId: 'ui:9',
+    });
+    expect(res.whatsappMessageId).toBe('wamid.text');
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ status: 'sent', message_id: 'wamid.text' });
+    expect(messages[0].client_message_id).toBeUndefined();
   });
 });

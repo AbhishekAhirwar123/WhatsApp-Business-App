@@ -13,8 +13,10 @@ import {
   INBOX_CONVERSATION_SELECT,
   LATEST_MESSAGE_EMBED,
   normalizeConversation,
+  sortConversations,
   withLastSender,
 } from '@/lib/inbox/conversations';
+import { isMissingSchemaError } from '@/lib/db/schema-compat';
 
 export type InboxQueue =
   | 'open'
@@ -66,6 +68,8 @@ export interface InboxCursor {
 export interface InboxPage {
   rows: Conversation[];
   next: InboxCursor | null;
+  /** True when migration 044 is missing and the list was built in the browser. */
+  basic?: boolean;
 }
 
 export const PAGE_SIZE = 50;
@@ -100,7 +104,10 @@ export async function fetchInboxPage(
     p_cursor_k2: cursor?.k2 ?? null,
     p_cursor_id: cursor?.id ?? null,
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    if (isMissingSchemaError(error)) return fetchInboxPageBasic(db, filters, sort, cursor, limit);
+    throw new Error(error.message);
+  }
 
   const keys = (data ?? []) as {
     conversation_id: string;
@@ -149,6 +156,8 @@ export async function fetchInboxPage(
 export interface InboxCounts {
   [key: string]: number | boolean | undefined;
   sla_enabled?: boolean;
+  /** Set when counts were computed in the browser (migration 044 missing). */
+  basic_mode?: boolean;
 }
 
 export async function fetchInboxCounts(
@@ -156,8 +165,98 @@ export async function fetchInboxCounts(
   filters: InboxFilters,
 ): Promise<InboxCounts> {
   const { data, error } = await db.rpc('inbox_counts', { p_filters: compactFilters(filters) });
-  if (error) throw new Error(error.message);
+  if (error) {
+    if (isMissingSchemaError(error)) return fetchInboxCountsBasic(db, filters);
+    throw new Error(error.message);
+  }
   return (data ?? {}) as InboxCounts;
+}
+
+// ── Basic mode (migration 044 not applied yet) ───────────────────────
+// Loads the account's conversations directly (RLS-scoped) and applies the
+// same queue rules in the browser. Per-user unread falls back to the
+// shared counter, awaiting reply is derived from who sent the latest
+// message, and custom-field filters / SLA are unavailable.
+
+const BASIC_MAX_ROWS = 2000;
+
+async function loadBasicRows(db: SupabaseClient): Promise<Conversation[]> {
+  const rows: Conversation[] = [];
+  for (let from = 0; from < BASIC_MAX_ROWS; from += 500) {
+    const { data, error } = await db
+      .from('conversations')
+      .select(INBOX_CONVERSATION_SELECT)
+      .order('last_message_at', { ascending: false, nullsFirst: false })
+      .order('created_at', { referencedTable: LATEST_MESSAGE_EMBED, ascending: false })
+      .limit(1, { referencedTable: LATEST_MESSAGE_EMBED })
+      .range(from, from + 499);
+    if (error) throw new Error(error.message);
+    const page = (data ?? []).map((r) => {
+      const c = withLastSender(normalizeConversation(r as Conversation));
+      return {
+        ...c,
+        my_unread_count: c.unread_count ?? 0,
+        awaiting_reply_since:
+          c.last_sender === 'customer' && c.status !== 'closed' ? (c.last_sender_at ?? null) : null,
+      };
+    });
+    rows.push(...page);
+    if (page.length < 500) break;
+  }
+  return rows;
+}
+
+function basicMatches(c: Conversation, f: InboxFilters, userId: string | null): boolean {
+  if (!rowMatchesQueue(c, f, userId)) return false;
+  if (f.tag_ids?.length && !(c.contact?.tags ?? []).some((t) => f.tag_ids!.includes(t.id))) return false;
+  const activity = c.last_message_at ?? c.created_at;
+  if (f.date_from && activity < f.date_from) return false;
+  if (f.date_to && activity >= f.date_to) return false;
+  const q = f.search?.trim().toLowerCase();
+  if (q) {
+    const hay = `${c.contact?.name ?? ''} ${c.contact?.phone ?? ''} ${c.last_message_text ?? ''}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+async function currentUserId(db: SupabaseClient): Promise<string | null> {
+  const { data } = await db.auth.getSession();
+  return data.session?.user.id ?? null;
+}
+
+async function fetchInboxPageBasic(
+  db: SupabaseClient,
+  filters: InboxFilters,
+  sort: InboxSortKey,
+  cursor: InboxCursor | null,
+  limit: number,
+): Promise<InboxPage> {
+  const [all, userId] = await Promise.all([loadBasicRows(db), currentUserId(db)]);
+  const matched = sortConversations(all.filter((c) => basicMatches(c, filters, userId)), sort);
+  // Offset cursor in basic mode (k1 = -1 marks it).
+  const offset = cursor && cursor.k1 === -1 ? cursor.k2 : 0;
+  const rows = matched.slice(offset, offset + limit);
+  const nextOffset = offset + rows.length;
+  return {
+    rows,
+    next: nextOffset < matched.length ? { k1: -1, k2: nextOffset, id: '' } : null,
+    basic: true,
+  };
+}
+
+async function fetchInboxCountsBasic(db: SupabaseClient, filters: InboxFilters): Promise<InboxCounts> {
+  const [all, userId] = await Promise.all([loadBasicRows(db), currentUserId(db)]);
+  const out: InboxCounts = { sla_enabled: false, basic_mode: true };
+  const queues: InboxQueue[] = ['open', 'pending', 'closed', 'awaiting', 'unread', 'all', 'unassigned'];
+  for (const scope of ['all', 'mine'] as InboxScope[]) {
+    for (const queue of queues) {
+      if (scope === 'mine' && queue === 'unassigned') continue;
+      const f = { ...filters, scope, queue };
+      out[`${scope}:${queue}`] = all.filter((c) => basicMatches(c, f, userId)).length;
+    }
+  }
+  return out;
 }
 
 export function countFor(counts: InboxCounts | null, scope: InboxScope, queue: InboxQueue): number | null {
@@ -186,13 +285,20 @@ export async function fetchViews(db: SupabaseClient): Promise<InboxView[]> {
     .select('id, name, owner_user_id, filters, position')
     .order('position')
     .order('created_at');
-  if (error) throw new Error(error.message);
+  if (error) {
+    // Saved views arrive with migration 044; none exist before it.
+    if (isMissingSchemaError(error)) return [];
+    throw new Error(error.message);
+  }
   return (data ?? []) as InboxView[];
 }
 
 export async function fetchViewCounts(db: SupabaseClient): Promise<Record<string, number>> {
   const { data, error } = await db.rpc('inbox_view_counts');
-  if (error) throw new Error(error.message);
+  if (error) {
+    if (isMissingSchemaError(error)) return {};
+    throw new Error(error.message);
+  }
   const out: Record<string, number> = {};
   for (const r of (data ?? []) as { view_id: string; total: number }[]) out[r.view_id] = r.total;
   return out;
