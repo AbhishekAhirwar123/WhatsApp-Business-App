@@ -41,6 +41,7 @@ import {
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils';
 import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
+import { isMissingSchemaError } from '@/lib/db/schema-compat';
 import type { MessageTemplate } from '@/types';
 import {
   resolveTemplateRow,
@@ -87,6 +88,15 @@ export interface SendMessageParams {
   /** Structured payload for `messageType === 'interactive'`. */
   interactivePayload?: InteractiveMessagePayload | null;
   replyToMessageId?: string | null;
+  /** The human agent sending (stored as messages.sender_id for attribution). */
+  senderId?: string | null;
+  /**
+   * Caller-generated idempotency key, unique per conversation. When set,
+   * a pending row is written BEFORE Meta is called, so a retried request
+   * with the same key returns the original message instead of sending a
+   * second WhatsApp message.
+   */
+  clientMessageId?: string | null;
 }
 
 export interface SendMessageResult {
@@ -94,6 +104,73 @@ export interface SendMessageResult {
   messageId: string;
   /** Meta's `wamid` for the delivered message. */
   whatsappMessageId: string;
+  /** True when an earlier request with the same clientMessageId already sent it. */
+  duplicate?: boolean;
+}
+
+/** WhatsApp's customer-service window: free-form messages are allowed for
+ *  24h after the customer's latest message. Templates are always allowed. */
+export const CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export function isWithinCustomerWindow(
+  lastInboundAt: string | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!lastInboundAt) return false;
+  const t = Date.parse(lastInboundAt);
+  return Number.isFinite(t) && now - t < CUSTOMER_WINDOW_MS;
+}
+
+/**
+ * Sends a contact must never receive. `blocked_at` is a local CRM block
+ * (it does not block the number on WhatsApp itself). An opted-out contact
+ * can still be answered inside the customer-service window, but never
+ * receives a business-initiated template.
+ */
+export function assertContactSendable(
+  contact: { blocked_at?: string | null; opt_in_status?: string | null } | null | undefined,
+  messageType: string,
+): void {
+  if (contact?.blocked_at) {
+    throw new SendMessageError(
+      'contact_blocked',
+      'This contact is blocked in the CRM. Unblock them to send messages.',
+      403,
+    );
+  }
+  if (messageType === 'template' && contact?.opt_in_status === 'opted_out') {
+    throw new SendMessageError(
+      'contact_opted_out',
+      'This contact opted out of business-initiated messages; templates cannot be sent.',
+      403,
+    );
+  }
+}
+
+/** Latest inbound customer message time for a conversation. */
+async function lastInboundAt(
+  db: SupabaseClient,
+  conversation: { id: string; last_inbound_at?: string | null },
+): Promise<string | null> {
+  // Migration 044 maintains this column; read it straight off the row.
+  if (conversation.last_inbound_at !== undefined) return conversation.last_inbound_at;
+  const { data } = await db
+    .from('messages')
+    .select('created_at')
+    .eq('conversation_id', conversation.id)
+    .eq('sender_type', 'customer')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data as { created_at?: string } | null)?.created_at ?? null;
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err && typeof err === 'object' && 'message' in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
 }
 
 /**
@@ -200,6 +277,8 @@ export async function sendMessageToConversation(
     templateMessageParams,
     interactivePayload,
     replyToMessageId,
+    senderId,
+    clientMessageId,
   } = params;
 
   if (!conversationId) {
@@ -233,6 +312,20 @@ export async function sendMessageToConversation(
   }
 
   const contact = conversation.contact;
+
+  // Server-side eligibility — the UI checks these too, but every caller
+  // (dashboard, public API, scheduler) must be held to them.
+  assertContactSendable(contact, messageType);
+  if (messageType !== 'template') {
+    const inbound = await lastInboundAt(db, conversation);
+    if (!isWithinCustomerWindow(inbound)) {
+      throw new SendMessageError(
+        'window_closed',
+        'The 24-hour customer window is closed. Send an approved template to re-engage.',
+        422,
+      );
+    }
+  }
 
   // A contact is addressable by phone number OR by business-scoped user
   // ID. Meta withholds the phone number for a customer who has adopted
@@ -405,6 +498,79 @@ export async function sendMessageToConversation(
     return result.messageId;
   };
 
+  // What we persist. Interactive messages store the body as content_text
+  // (so the list preview reads sensibly) plus the structured payload so
+  // the thread can re-render buttons / rows. Templates store the
+  // *substituted* body — storing null left empty bubbles (issue #483).
+  const persistedText =
+    messageType === 'interactive'
+      ? interactivePayload!.body
+      : messageType === 'template'
+        ? templateContentText(
+            templateRow,
+            templateBodyParams(templateParams, templateMessageParams),
+            contentText
+          )
+        : (contentText ?? null);
+
+  const messageRow = {
+    conversation_id: conversationId,
+    sender_type: 'agent',
+    content_type: messageType,
+    content_text: persistedText,
+    media_url: mediaUrl || null,
+    template_name: templateName || null,
+    interactive_payload:
+      messageType === 'interactive' ? interactivePayload : null,
+    reply_to_message_id: replyToMessageId || null,
+    sender_id: senderId || null,
+  };
+
+  // Outbox claim (idempotent path). The pending row is unique on
+  // (conversation_id, client_message_id), so a retried request either
+  // finds the finished message (and returns it) or finds it in flight
+  // (and refuses) — it never reaches Meta a second time.
+  let pendingId: string | null = null;
+  if (clientMessageId) {
+    const { data: pending, error: pendingErr } = await db
+      .from('messages')
+      .insert({ ...messageRow, status: 'sending', client_message_id: clientMessageId })
+      .select('id')
+      .single();
+
+    if (pendingErr && isMissingSchemaError(pendingErr)) {
+      // Migration 044 (client_message_id) not applied yet: fall back to
+      // the original insert-after-send path without idempotency.
+      console.warn('[send-message] outbox column missing — apply migration 044');
+    } else if (pendingErr) {
+      if ((pendingErr as { code?: string }).code !== '23505') {
+        throw new SendMessageError(
+          'db_error',
+          `Could not queue the message: ${pendingErr.message}`,
+          500,
+        );
+      }
+      const { data: existing } = await db
+        .from('messages')
+        .select('id, status, message_id')
+        .eq('conversation_id', conversationId)
+        .eq('client_message_id', clientMessageId)
+        .maybeSingle();
+      const prior = existing as { id: string; status: string; message_id: string | null } | null;
+      if (prior && prior.message_id && prior.status !== 'failed' && prior.status !== 'sending') {
+        return { messageId: prior.id, whatsappMessageId: prior.message_id, duplicate: true };
+      }
+      throw new SendMessageError(
+        'duplicate_request',
+        prior?.status === 'failed'
+          ? 'This message already failed. Send it again as a new message.'
+          : 'This message is already being sent.',
+        409,
+      );
+    }
+    pendingId = (pending as { id: string } | null)?.id ?? null;
+  }
+
   // Send via Meta — retry across phone-number variants if Meta rejects
   // with "recipient not in allowed list"; persist a working variant
   // back to the contact so the next send goes straight through.
@@ -439,6 +605,14 @@ export async function sendMessageToConversation(
     const message =
       err instanceof Error ? err.message : 'Unknown Meta API error';
     console.error('[send-message] Meta send failed for all variants:', message);
+    if (pendingId) {
+      // Record the failure on the pending row so the thread shows a
+      // failed bubble with the reason instead of a phantom "sending".
+      await db
+        .from('messages')
+        .update({ status: 'failed', error_title: message.slice(0, 500) })
+        .eq('id', pendingId);
+    }
     throw new SendMessageError('meta_error', `Meta API error: ${message}`, 502);
   }
 
@@ -452,50 +626,25 @@ export async function sendMessageToConversation(
       .eq('id', contact.id);
   }
 
-  // Persist the sent message. Field names MUST match the messages
-  // schema (see 001_initial_schema.sql).
-  // Interactive messages persist the body as content_text (so the
-  // conversation-list preview reads sensibly) plus the full structured
-  // payload so the thread can re-render the buttons / rows.
-  //
-  // Templates persist the *substituted* body. The composer pre-renders
-  // and posts it as contentText; every other caller (the public API,
-  // most importantly) sends none, and storing null there left the
-  // Inbox rendering an empty bubble — issue #483.
-  const persistedText =
-    messageType === 'interactive'
-      ? interactivePayload!.body
-      : messageType === 'template'
-        ? templateContentText(
-            templateRow,
-            templateBodyParams(templateParams, templateMessageParams),
-            contentText
-          )
-        : (contentText ?? null);
-
-  const { data: messageRecord, error: msgError } = await db
-    .from('messages')
-    .insert({
-      conversation_id: conversationId,
-      sender_type: 'agent',
-      content_type: messageType,
-      content_text: persistedText,
-      media_url: mediaUrl || null,
-      template_name: templateName || null,
-      interactive_payload:
-        messageType === 'interactive' ? interactivePayload : null,
-      message_id: waMessageId,
-      status: 'sent',
-      reply_to_message_id: replyToMessageId || null,
-    })
-    .select()
-    .single();
+  // Persist the accepted message: settle the pending row, or insert.
+  const { data: messageRecord, error: msgError } = pendingId
+    ? await db
+        .from('messages')
+        .update({ status: 'sent', message_id: waMessageId })
+        .eq('id', pendingId)
+        .select()
+        .single()
+    : await db
+        .from('messages')
+        .insert({ ...messageRow, message_id: waMessageId, status: 'sent' })
+        .select()
+        .single();
 
   if (msgError) {
-    console.error('[send-message] error inserting sent message:', msgError);
+    console.error('[send-message] error persisting sent message:', msgError);
     throw new SendMessageError(
       'db_error',
-      `Message sent to Meta but failed to save to DB: ${msgError.message}`,
+      `Message sent to Meta but failed to save to DB: ${errorMessage(msgError)}`,
       500
     );
   }

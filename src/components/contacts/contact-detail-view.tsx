@@ -42,7 +42,15 @@ import {
 } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import { contactHandle } from '@/lib/whatsapp/wa-identity';
-import { parseInternationalPhone } from '@/lib/whatsapp/phone-utils';
+import {
+  fixDoubledCountryCode,
+  parseInternationalPhone,
+} from '@/lib/whatsapp/phone-utils';
+import {
+  getFieldOptions,
+  isDropdownField,
+  withCurrentValue,
+} from '@/lib/contacts/custom-field-options';
 
 interface ContactDetailViewProps {
   open: boolean;
@@ -159,7 +167,7 @@ export function ContactDetailView({
         .eq('contact_id', contactId),
     ]);
 
-    if (fieldsRes.data) setCustomFields(fieldsRes.data);
+    if (fieldsRes.data) setCustomFields((fieldsRes.data as CustomField[]).filter((f) => !f.archived_at));
     if (valuesRes.data) {
       const map: Record<string, string> = {};
       valuesRes.data.forEach((v) => {
@@ -212,6 +220,14 @@ export function ContactDetailView({
     const phoneChanged = editPhone.trim() !== (contact?.phone ?? '');
     if (phoneChanged && !parseInternationalPhone(editPhone)) {
       toast.error(t('toastPhoneNeedsCountryCode'));
+      return;
+    }
+    const repaired = phoneChanged ? fixDoubledCountryCode(editPhone) : null;
+    if (repaired) {
+      toast.error(
+        `This number has its country code twice. Did you mean +${repaired}?`,
+      );
+      setEditPhone(`+${repaired}`);
       return;
     }
 
@@ -670,17 +686,40 @@ export function ContactDetailView({
                         <Label className="text-muted-foreground text-xs capitalize">
                           {field.field_name}
                         </Label>
-                        <Input
-                          value={customValues[field.id] ?? ''}
-                          onChange={(e) =>
-                            setCustomValues((prev) => ({
-                              ...prev,
-                              [field.id]: e.target.value,
-                            }))
-                          }
-                          placeholder={t('enterCustomField', { name: field.field_name })}
-                          className="bg-muted border-border text-foreground h-8 text-sm placeholder:text-muted-foreground"
-                        />
+                        {isDropdownField(field) ? (
+                          <select
+                            value={customValues[field.id] ?? ''}
+                            onChange={(e) =>
+                              setCustomValues((prev) => ({
+                                ...prev,
+                                [field.id]: e.target.value,
+                              }))
+                            }
+                            className="h-8 w-full rounded-md border border-border bg-muted px-2 text-sm text-foreground outline-none focus:border-primary"
+                          >
+                            <option value="">Select…</option>
+                            {withCurrentValue(
+                              getFieldOptions(field),
+                              customValues[field.id],
+                            ).map((o) => (
+                              <option key={o} value={o}>
+                                {o}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <Input
+                            value={customValues[field.id] ?? ''}
+                            onChange={(e) =>
+                              setCustomValues((prev) => ({
+                                ...prev,
+                                [field.id]: e.target.value,
+                              }))
+                            }
+                            placeholder={t('enterCustomField', { name: field.field_name })}
+                            className="bg-muted border-border text-foreground h-8 text-sm placeholder:text-muted-foreground"
+                          />
+                        )}
                       </div>
                     ))}
                     <Button

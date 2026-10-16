@@ -118,6 +118,33 @@ interface MessageComposerProps {
   onOpenTemplates: () => void;
   replyTo?: ReplyDraft | null;
   onClearReply?: () => void;
+  /**
+   * localStorage key for this user's unsent text in this conversation
+   * (e.g. `wacrm:draft:<userId>:<conversationId>`). Restored on return,
+   * cleared on send. Omit to disable drafts.
+   */
+  draftKey?: string;
+  /** Contact is blocked in the CRM: free-form sending is disabled. */
+  blocked?: boolean;
+}
+
+function readDraft(key?: string): string {
+  if (!key) return "";
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeDraft(key: string | undefined, value: string) {
+  if (!key) return;
+  try {
+    if (value.trim()) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    // Drafts are a convenience; storage can be unavailable.
+  }
 }
 
 function formatDuration(seconds: number): string {
@@ -140,10 +167,25 @@ export function MessageComposer({
   onOpenTemplates,
   replyTo,
   onClearReply,
+  draftKey,
+  blocked = false,
 }: MessageComposerProps) {
   const t = useTranslations("Inbox.composer");
 
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => readDraft(draftKey));
+  // Switching conversations swaps in that conversation's own draft.
+  const loadedDraftKeyRef = useRef(draftKey);
+  useEffect(() => {
+    if (loadedDraftKeyRef.current === draftKey) return;
+    loadedDraftKeyRef.current = draftKey;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setText(readDraft(draftKey));
+  }, [draftKey]);
+  // Persist as the agent types (debounced).
+  useEffect(() => {
+    const h = setTimeout(() => writeDraft(loadedDraftKeyRef.current, text), 300);
+    return () => clearTimeout(h);
+  }, [text]);
   const [sending, setSending] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -189,8 +231,10 @@ export function MessageComposer({
   // every capability — so the disabled branch is a no-op there.
   const canSend = useCan("send-messages");
   const readOnly = !canSend;
-  // Media (like free-form text) is only allowed inside the 24h window.
-  const inputsDisabled = readOnly || sessionExpired;
+  // Media (like free-form text) is only allowed inside the 24h window,
+  // and never to a contact blocked in the CRM.
+  const sessionClosed = sessionExpired || blocked;
+  const inputsDisabled = readOnly || sessionClosed;
 
   const clearTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -222,19 +266,20 @@ export function MessageComposer({
 
   const handleSend = useCallback(async () => {
     const trimmed = text.trim();
-    if (!trimmed || sending || sessionExpired) return;
+    if (!trimmed || sending || sessionClosed) return;
 
     setSending(true);
     try {
       onSend(trimmed, replyTo?.id);
       setText("");
+      writeDraft(draftKey, "");
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
     } finally {
       setSending(false);
     }
-  }, [text, sending, sessionExpired, onSend, replyTo?.id]);
+  }, [text, sending, sessionClosed, onSend, replyTo?.id, draftKey]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -734,11 +779,13 @@ export function MessageComposer({
             placeholder={
               readOnly
                 ? t("readOnlyPlaceholder")
-                : sessionExpired
-                  ? t("sessionExpiredPlaceholder")
-                  : t("typeMessagePlaceholder")
+                : blocked
+                  ? "Contact is blocked — unblock to send messages"
+                  : sessionExpired
+                    ? t("sessionExpiredPlaceholder")
+                    : t("typeMessagePlaceholder")
             }
-            disabled={sessionExpired || readOnly}
+            disabled={sessionClosed || readOnly}
             rows={1}
             // Textarea keeps its own inline title — the GatedButton
             // wrapping pattern doesn't apply to non-button inputs.
@@ -746,7 +793,7 @@ export function MessageComposer({
             title={readOnly ? t("readOnlyTitle") : undefined}
             className={cn(
               "flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
-              (sessionExpired || readOnly) && "cursor-not-allowed opacity-50"
+              (sessionClosed || readOnly) && "cursor-not-allowed opacity-50"
             )}
           />
 
@@ -754,7 +801,7 @@ export function MessageComposer({
             size="sm"
             canAct={!readOnly}
             gateReason="send messages"
-            disabled={!text.trim() || sessionExpired || sending}
+            disabled={!text.trim() || sessionClosed || sending}
             onClick={handleSend}
             className="h-9 w-9 shrink-0 bg-primary p-0 hover:bg-primary/90 disabled:opacity-40"
           >

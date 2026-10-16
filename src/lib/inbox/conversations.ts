@@ -1,4 +1,4 @@
-import type { Conversation, Contact, Tag } from "@/types";
+import type { Conversation, Contact, SenderType, Tag } from "@/types";
 
 /**
  * Conversation select that embeds the contact plus its tags, so the Inbox
@@ -68,4 +68,109 @@ export function matchesContactFilters(
   }
 
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Inbox folders & sorting
+// ---------------------------------------------------------------------------
+
+/**
+ * Inbox list select: {@link CONVERSATION_SELECT} plus the conversation's
+ * latest message (sender + time), which is what "Awaiting reply" and the
+ * "Waiting longest for reply" sort need. Must be paired with
+ * {@link LATEST_MESSAGE_EMBED} ordering/limit so PostgREST returns one
+ * message per conversation instead of the whole thread.
+ */
+export const INBOX_CONVERSATION_SELECT = `${CONVERSATION_SELECT}, latest_message:messages(sender_type, created_at, status)`;
+
+/** Alias of the embedded latest message — the `referencedTable` for order/limit. */
+export const LATEST_MESSAGE_EMBED = "latest_message";
+
+type LatestMessage = { sender_type: SenderType; created_at: string; status?: string | null };
+
+/**
+ * Lift the embedded latest message onto `last_sender` / `last_sender_at`.
+ * Picks the newest row itself, so it's correct even if the embed limit was
+ * not applied. Rows without the embed pass through unchanged.
+ */
+export function withLastSender<T extends Conversation>(
+  conv: T & { latest_message?: LatestMessage[] | null },
+): T {
+  const { latest_message, ...rest } = conv;
+  if (!latest_message) return conv;
+  const latest = latest_message.reduce<LatestMessage | null>(
+    (best, m) => (!best || m.created_at > best.created_at ? m : best),
+    null,
+  );
+  return {
+    ...(rest as unknown as T),
+    last_sender: latest?.sender_type ?? null,
+    last_sender_at: latest?.created_at ?? null,
+    last_message_status: latest?.status ?? null,
+  };
+}
+
+export type InboxFolder =
+  | "open"
+  | "pending"
+  | "closed"
+  | "awaiting"
+  | "unread"
+  | "all"
+  | "mine"
+  | "unassigned";
+
+/** The customer spoke last and nobody has answered yet. */
+export function isAwaitingReply(conv: Conversation): boolean {
+  return conv.last_sender === "customer" && conv.status !== "closed";
+}
+
+export function matchesFolder(
+  conv: Conversation,
+  folder: InboxFolder,
+  currentUserId: string | null,
+): boolean {
+  switch (folder) {
+    case "open":
+    case "pending":
+    case "closed":
+      return conv.status === folder;
+    case "awaiting":
+      return isAwaitingReply(conv);
+    case "unread":
+      return conv.unread_count > 0;
+    case "mine":
+      return !!currentUserId && conv.assigned_agent_id === currentUserId;
+    case "unassigned":
+      return !conv.assigned_agent_id && conv.status !== "closed";
+    case "all":
+    default:
+      return true;
+  }
+}
+
+export type InboxSort = "newest" | "waiting_longest";
+
+/**
+ * "newest": latest activity first (default). "waiting_longest": chats
+ * awaiting a reply first, oldest unanswered customer message on top, then
+ * everything else newest-first.
+ */
+export function sortConversations(
+  list: Conversation[],
+  sort: InboxSort,
+): Conversation[] {
+  const time = (c: Conversation) => c.last_message_at ?? c.updated_at ?? "";
+  const newestFirst = (a: Conversation, b: Conversation) =>
+    time(b).localeCompare(time(a));
+  if (sort === "newest") return [...list].sort(newestFirst);
+  return [...list].sort((a, b) => {
+    const aw = isAwaitingReply(a);
+    const bw = isAwaitingReply(b);
+    if (aw !== bw) return aw ? -1 : 1;
+    if (aw) {
+      return (a.last_sender_at ?? time(a)).localeCompare(b.last_sender_at ?? time(b));
+    }
+    return newestFirst(a, b);
+  });
 }

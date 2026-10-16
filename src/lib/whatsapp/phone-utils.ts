@@ -77,6 +77,88 @@ export function parseInternationalPhone(raw: string | null | undefined): string 
 }
 
 /**
+ * National significant-number length for country codes where a doubled
+ * prefix is common in hand-typed data ("+91" picked, then "919174824860"
+ * pasted → "+91 91 9174824860"). Only fixed-length plans are listed, so
+ * `cc + cc + national` can never be a real number for these codes.
+ */
+const NATIONAL_LENGTH_BY_CC: Record<string, number> = {
+  '1': 10, // US / Canada (area codes never start with 1)
+  '91': 10, // India
+  '92': 10, // Pakistan
+  '880': 10, // Bangladesh
+  '971': 9, // UAE
+  '966': 9, // Saudi Arabia
+  '65': 8, // Singapore
+  '61': 9, // Australia
+}
+
+/**
+ * Detect a country code that was typed twice and return the corrected
+ * digits-only number, or null when the number looks fine.
+ * e.g. "91919174824860" → "919174824860".
+ */
+export function fixDoubledCountryCode(digits: string): string | null {
+  const d = normalizePhone(digits)
+  for (const [cc, nationalLen] of Object.entries(NATIONAL_LENGTH_BY_CC)) {
+    if (d.length === cc.length * 2 + nationalLen && d.startsWith(cc + cc)) {
+      return d.slice(cc.length)
+    }
+  }
+  return null
+}
+
+/**
+ * Turn a phone cell from a spreadsheet into E.164 (`+<digits>`), using
+ * `defaultCountryCode` (e.g. "91" or "+91") for numbers written without
+ * one. Returns null when nothing usable can be produced.
+ *
+ *   "+91 98765 43210"  → "+919876543210"   (already international)
+ *   "0091 9876543210"  → "+919876543210"   (00 international prefix)
+ *   "09876543210"      → "+919876543210"   (trunk 0 dropped, cc added)
+ *   "9876543210"       → "+919876543210"   (cc added)
+ *   "919876543210"     → "+919876543210"   (cc already present)
+ *   "+91919876543210"  → "+919876543210"   (doubled cc repaired)
+ *
+ * Spreadsheets often turn numbers into "9.19876E+11" or "919876543210.0";
+ * the latter is handled, the former has lost digits and is rejected.
+ */
+export function toInternationalPhone(
+  raw: string | null | undefined,
+  defaultCountryCode?: string | null,
+): string | null {
+  if (!raw) return null
+  // Drop an Excel float suffix ("919876543210.0") before stripping dots,
+  // or the trailing 0 would become part of the number.
+  const compact = raw
+    .trim()
+    .replace(/\.0+$/, '')
+    .replace(/[\s().\-/]/g, '')
+  if (/e\+?\d+$/i.test(compact)) return null
+
+  let digits: string
+  if (compact.startsWith('+')) {
+    digits = compact.slice(1)
+  } else if (compact.startsWith('00')) {
+    digits = compact.slice(2)
+  } else {
+    const cc = (defaultCountryCode ?? '').replace(/\D/g, '')
+    const national = compact.replace(/^0+/, '')
+    if (!/^\d+$/.test(national)) return null
+    if (!cc) return null
+    const expected = NATIONAL_LENGTH_BY_CC[cc]
+    const alreadyHasCc = expected
+      ? national.length === cc.length + expected && national.startsWith(cc)
+      : national.startsWith(cc) && national.length >= cc.length + 8
+    digits = alreadyHasCc ? national : cc + national
+  }
+
+  if (!/^\d+$/.test(digits)) return null
+  digits = fixDoubledCountryCode(digits) ?? digits
+  return isValidE164(digits) ? `+${digits}` : null
+}
+
+/**
  * Generate plausible phone number variants for retry when Meta's
  * sandbox rejects a number with error #131030 ("not in allowed list").
  *

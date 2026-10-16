@@ -13,7 +13,8 @@ import {
   phoneVariants,
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
-import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
+import { assertContactNotBlocked, resolveContactSendTarget } from '@/lib/whatsapp/wa-identity'
+import { selectContactForSend } from '@/lib/contacts/send-contact'
 import { supabaseAdmin } from './admin-client'
 
 // ------------------------------------------------------------
@@ -90,18 +91,14 @@ export async function engineSendText(
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
 
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id')
-    .eq('id', args.contactId)
-    .eq('account_id', args.accountId)
-    .maybeSingle()
+  const { data: contact, error: contactErr } = await selectContactForSend(db, args.accountId, args.contactId)
   if (contactErr || !contact) {
     throw new Error('contact not found for this account')
   }
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
+  assertContactNotBlocked(contact)
   const sendTarget = resolveContactSendTarget(contact)
   if (!sendTarget) {
     throw new Error(
@@ -199,18 +196,14 @@ export async function engineSendMedia(
 ): Promise<{ whatsapp_message_id: string }> {
   const db = supabaseAdmin()
 
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id')
-    .eq('id', args.contactId)
-    .eq('account_id', args.accountId)
-    .maybeSingle()
+  const { data: contact, error: contactErr } = await selectContactForSend(db, args.accountId, args.contactId)
   if (contactErr || !contact) {
     throw new Error('contact not found for this account')
   }
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
+  assertContactNotBlocked(contact)
   const sendTarget = resolveContactSendTarget(contact)
   if (!sendTarget) {
     throw new Error(
@@ -350,18 +343,14 @@ async function sendInteractiveViaMeta(
   // Scope the contact + whatsapp_config lookups by account_id —
   // same defense-in-depth rationale as automations/meta-send.ts.
   // Migration 017 moved both tables to account-scoped tenancy.
-  const { data: contact, error: contactErr } = await db
-    .from('contacts')
-    .select('id, phone, wa_user_id')
-    .eq('id', input.contactId)
-    .eq('account_id', input.accountId)
-    .maybeSingle()
+  const { data: contact, error: contactErr } = await selectContactForSend(db, input.accountId, input.contactId)
   if (contactErr || !contact) {
     throw new Error('contact not found for this account')
   }
 
   // Phone number, or the business-scoped user ID when Meta has never
   // given us a number for this customer (issue #519).
+  assertContactNotBlocked(contact)
   const sendTarget = resolveContactSendTarget(contact)
   if (!sendTarget) {
     throw new Error(

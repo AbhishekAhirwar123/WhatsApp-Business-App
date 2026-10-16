@@ -119,6 +119,22 @@ export interface Contact {
   email?: string;
   company?: string;
   avatar_url?: string;
+  /**
+   * Consent evidence (migration 044). `unknown` until someone records it;
+   * an inbound message alone is not marketing opt-in.
+   */
+  opt_in_status?: 'unknown' | 'opted_in' | 'opted_out';
+  opt_in_source?: string | null;
+  opt_in_scope?: string | null;
+  opt_in_at?: string | null;
+  opt_in_recorded_by?: string | null;
+  opt_out_at?: string | null;
+  /** Local CRM block — sends from UI, workers and automations are refused. */
+  blocked_at?: string | null;
+  blocked_by?: string | null;
+  blocked_reason?: string | null;
+  /** "Contact Owner" — an account member, distinct from the chat assignee. */
+  owner_user_id?: string | null;
   created_at: string;
   updated_at: string;
   /** Hydrated by queries that embed `contact_tags(tags(*))` (e.g. the
@@ -131,6 +147,8 @@ export interface Tag {
   user_id: string;
   name: string;
   color: string;
+  /** Archived tags stay on history but are hidden from pickers (044). */
+  archived_at?: string | null;
   created_at: string;
 }
 
@@ -148,6 +166,11 @@ export interface CustomField {
   field_name: string;
   field_type: string;
   field_options?: Record<string, unknown>;
+  /** Migration 044: stable key, display order, validation, archival. */
+  field_key?: string | null;
+  sort_order?: number;
+  required?: boolean;
+  archived_at?: string | null;
   created_at: string;
 }
 
@@ -174,6 +197,7 @@ export interface Conversation {
   contact_id: string;
   status: ConversationStatus;
   assigned_agent_id?: string;
+  account_id?: string;
   last_message_text?: string;
   last_message_at?: string;
   unread_count: number;
@@ -192,6 +216,27 @@ export interface Conversation {
   ai_autoreply_disabled?: boolean;
   ai_reply_count?: number;
   ai_handoff_summary?: string | null;
+  /**
+   * Who sent the conversation's latest message, and when. Not columns:
+   * the inbox list derives them from an embedded latest message (see
+   * INBOX_CONVERSATION_SELECT) and keeps them current from realtime
+   * message inserts. Drive "Awaiting reply" and the waiting-longest sort.
+   */
+  last_sender?: SenderType | null;
+  last_sender_at?: string | null;
+  /** Delivery status of the latest message (embedded, not a column). */
+  last_message_status?: string | null;
+  /** Migration 044 activity columns. */
+  last_inbound_at?: string | null;
+  awaiting_reply_since?: string | null;
+  first_human_reply_at?: string | null;
+  last_human_reply_at?: string | null;
+  resolved_at?: string | null;
+  version?: number;
+  /** Per-user values returned by the inbox_query RPC (not columns). */
+  my_unread_count?: number;
+  my_last_read_at?: string | null;
+  sla_due_at?: string | null;
 }
 
 // ============================================================

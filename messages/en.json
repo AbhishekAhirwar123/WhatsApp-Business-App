@@ -187,7 +187,7 @@
       "expired": "Expired",
       "xhRemaining": "{hours}h remaining",
       "xmRemaining": "{minutes}m remaining",
-      "noCustomerMessages": "No customer messages"
+      "noCustomerMessages": "Awaiting customer reply"
     },
     "composer": {
       "draftHint": "Tap the ✨ to draft a reply with AI — you can edit it before sending",
@@ -1673,6 +1673,7 @@
       "security": "Login & security",
       "appearance": "Appearance",
       "whatsapp": "WhatsApp",
+      "inbox": "Inbox",
       "templates": "Templates",
       "quick-replies": "Quick replies",
       "fields": "Fields & tags",

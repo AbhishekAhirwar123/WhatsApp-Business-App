@@ -12,7 +12,10 @@ import {
   isUniqueViolation,
   type ExistingContact,
 } from '@/lib/contacts/dedupe';
-import { parseInternationalPhone } from '@/lib/whatsapp/phone-utils';
+import {
+  fixDoubledCountryCode,
+  parseInternationalPhone,
+} from '@/lib/whatsapp/phone-utils';
 import {
   Dialog,
   DialogContent,
@@ -140,6 +143,16 @@ export function ContactForm({
     const phoneChanged = !isEdit || phone.trim() !== (contact?.phone ?? '');
     if (phoneChanged && !parseInternationalPhone(phone)) {
       toast.error(t('phoneNeedsCountryCode'));
+      return;
+    }
+    // "+91 91 98765 43210" — country code typed twice. Meta rejects these
+    // as undeliverable (#131026), so stop it here with the likely fix.
+    const repaired = phoneChanged ? fixDoubledCountryCode(phone) : null;
+    if (repaired) {
+      toast.error(
+        `This number has its country code twice. Did you mean +${repaired}?`,
+      );
+      setPhone(`+${repaired}`);
       return;
     }
 

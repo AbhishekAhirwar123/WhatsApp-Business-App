@@ -58,6 +58,7 @@ export async function POST(request: Request) {
       template_message_params,
       interactive_payload,
       reply_to_message_id,
+      client_message_id,
     } = body
 
     if ((!conversationIdInput && !contact_id) || !message_type) {
@@ -165,12 +166,20 @@ export async function POST(request: Request) {
         templateMessageParams: template_message_params,
         interactivePayload: interactive_payload,
         replyToMessageId: reply_to_message_id,
+        senderId: userId,
+        // Idempotency key from the composer — a retried request with the
+        // same key returns the original message instead of re-sending.
+        clientMessageId:
+          typeof client_message_id === 'string' && client_message_id.trim()
+            ? client_message_id.trim().slice(0, 100)
+            : null,
       })
 
       return NextResponse.json({
         success: true,
         message_id: result.messageId,
         whatsapp_message_id: result.whatsappMessageId,
+        duplicate: result.duplicate ?? false,
       })
     } catch (err) {
       if (err instanceof SendMessageError) {

@@ -20,8 +20,16 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { BroadcastError, type BroadcastPlan } from '@/lib/whatsapp/broadcast-core';
 import { decrypt } from '@/lib/whatsapp/encryption';
+import { isMissingSchemaError } from '@/lib/db/schema-compat';
 import { resolveTemplateRow } from '@/lib/whatsapp/template-body';
-import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils';
+import {
+  sanitizePhoneForMeta,
+  isValidE164,
+  fixDoubledCountryCode,
+} from '@/lib/whatsapp/phone-utils';
+
+/** Repair a doubled country code ("91 91 …") so Meta can deliver it. */
+const repairPhone = (digits: string) => fixDoubledCountryCode(digits) ?? digits;
 
 /** Which recipients a resume pass picks up. */
 export type ResumeScope = 'pending' | 'failed' | 'all';
@@ -118,13 +126,28 @@ export interface ResumePlan {
 interface RecipientRow {
   id: string;
   template_params: unknown;
-  contact: { phone?: string | null } | { phone?: string | null }[] | null;
+  contact: RecipientContact | RecipientContact[] | null;
+}
+
+interface RecipientContact {
+  phone?: string | null;
+  blocked_at?: string | null;
+  opt_in_status?: string | null;
 }
 
 /** Supabase renders an embedded to-one join as an object or a 1-array. */
+function contactOf(row: RecipientRow): RecipientContact | null {
+  return (Array.isArray(row.contact) ? row.contact[0] : row.contact) ?? null;
+}
+
 function contactPhone(row: RecipientRow): string | null {
-  const c = Array.isArray(row.contact) ? row.contact[0] : row.contact;
-  return c?.phone ?? null;
+  return contactOf(row)?.phone ?? null;
+}
+
+/** Blocked or opted-out contacts must not receive a broadcast (migration 044). */
+function isSuppressed(row: RecipientRow): boolean {
+  const c = contactOf(row);
+  return !!c?.blocked_at || c?.opt_in_status === 'opted_out';
 }
 
 /**
@@ -156,31 +179,48 @@ export async function planBroadcastResume(
   }
 
   const statuses = scopeStatuses(scope);
-  const { data: rawRows, error: recError } = await db
-    .from('broadcast_recipients')
-    .select('id, template_params, contact:contacts(phone)')
-    .eq('broadcast_id', broadcastId)
-    .in('status', statuses)
-    // Oldest first, so repeated capped passes chew through the backlog
-    // in a stable order instead of re-picking the same slice.
-    .order('created_at', { ascending: true });
+  const loadRecipients = (contactCols: string) =>
+    db
+      .from('broadcast_recipients')
+      .select(`id, template_params, contact:contacts(${contactCols})`)
+      .eq('broadcast_id', broadcastId)
+      .in('status', statuses)
+      // Oldest first, so repeated capped passes chew through the backlog
+      // in a stable order instead of re-picking the same slice.
+      .order('created_at', { ascending: true });
+  let { data: rawRows, error: recError } = await loadRecipients('phone, blocked_at, opt_in_status');
+  if (recError && isMissingSchemaError(recError)) {
+    // Migration 044 (block / opt-in columns) not applied yet.
+    ({ data: rawRows, error: recError } = await loadRecipients('phone'));
+  }
 
   if (recError) {
     console.error('[broadcast-resume] recipient load failed:', recError.message);
     throw new BroadcastError('internal', 'Failed to load recipients', 500);
   }
 
-  const rows = (rawRows ?? []) as RecipientRow[];
+  const rows = (rawRows ?? []) as unknown as RecipientRow[];
 
   // A recipient whose contact has no usable phone can never send. Stamp
   // it failed now: leaving it 'pending' would keep the broadcast in
   // 'sending' forever, which is the very symptom being fixed.
   const sendable: RecipientRow[] = [];
   const unsendable: string[] = [];
+  const suppressed: string[] = [];
   for (const row of rows) {
     const sanitized = sanitizePhoneForMeta(contactPhone(row) ?? '');
-    if (isValidE164(sanitized)) sendable.push(row);
+    if (isSuppressed(row)) suppressed.push(row.id);
+    else if (isValidE164(sanitized)) sendable.push(row);
     else unsendable.push(row.id);
+  }
+  if (suppressed.length > 0) {
+    await db
+      .from('broadcast_recipients')
+      .update({
+        status: 'failed',
+        error_message: 'Contact is blocked or opted out',
+      })
+      .in('id', suppressed);
   }
   if (unsendable.length > 0) {
     await db
@@ -241,7 +281,7 @@ export async function planBroadcastResume(
     templateRow: resolvedTemplate.row,
     planned: slice.map((row) => ({
       recipientRowId: row.id,
-      phone: sanitizePhoneForMeta(contactPhone(row) ?? ''),
+      phone: repairPhone(sanitizePhoneForMeta(contactPhone(row) ?? '')),
       params: Array.isArray(row.template_params)
         ? row.template_params.filter((p): p is string => typeof p === 'string')
         : [],
@@ -249,7 +289,7 @@ export async function planBroadcastResume(
     rejected: 0,
   };
 
-  return { plan, remaining, unsendable: unsendable.length };
+  return { plan, remaining, unsendable: unsendable.length + suppressed.length };
 }
 
 /**

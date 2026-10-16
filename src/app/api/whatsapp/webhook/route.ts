@@ -13,6 +13,7 @@ import {
 } from '@/lib/whatsapp/wa-identity'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
+import { loadInboxSettings } from '@/lib/inbox/settings'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
@@ -850,7 +851,13 @@ async function processMessage(
   // separate conditional statement rather than a `status` field on the
   // update above so the write can be gated on the row's CURRENT status in
   // SQL — see the helper for why that matters.
-  await reopenClosedConversation(supabaseAdmin(), conversation)
+  // Whether it does is an account policy (inbox_settings, default on).
+  if (conversation.status === 'closed') {
+    const settings = await loadInboxSettings(supabaseAdmin(), accountId)
+    await reopenClosedConversation(supabaseAdmin(), conversation, {
+      reopenOnInbound: settings.reopen_on_inbound,
+    })
+  }
 
   // If this contact was a recent broadcast recipient, flag the reply
   // so the broadcast's `replied_count` advances (via the aggregate

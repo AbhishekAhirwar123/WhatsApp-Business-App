@@ -94,6 +94,24 @@ describe('parseBroadcastCsv', () => {
     });
   });
 
+  it('adds a default country code when one is given', () => {
+    const result = parseBroadcastCsv(
+      `mobile,name
+98765 43210,Ada
++14155551212,Grace`,
+      { defaultCountryCode: '91' },
+    );
+    expect(result).toEqual({
+      ok: true,
+      duplicates: 0,
+      invalid: 0,
+      contacts: [
+        { phone: '+919876543210', name: 'Ada' },
+        { phone: '+14155551212', name: 'Grace' },
+      ],
+    });
+  });
+
   it('reports no_valid_rows when every number lacks a country code', () => {
     expect(parseBroadcastCsv(`phone,name\n4155551212,Ada`)).toEqual({
       ok: false,

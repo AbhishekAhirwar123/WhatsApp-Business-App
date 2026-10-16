@@ -31,6 +31,7 @@ import {
   isValidE164,
   normalizePhone,
   sanitizePhoneForMeta,
+  fixDoubledCountryCode,
 } from './phone-utils'
 
 /** The `contacts[]` entry Meta pairs with an inbound message. */
@@ -187,7 +188,9 @@ export function resolveContactSendTarget(contact: {
   phone?: string | null
   wa_user_id?: string | null
 } | null | undefined): WaSendTarget | null {
-  const sanitized = sanitizePhoneForMeta(contact?.phone ?? '')
+  const digits = sanitizePhoneForMeta(contact?.phone ?? '')
+  // "+91 91 98765 43210" (country code typed twice) is undeliverable.
+  const sanitized = fixDoubledCountryCode(digits) ?? digits
   if (isValidE164(sanitized)) return { target: sanitized, isPhone: true }
 
   const waUserId = contact?.wa_user_id?.trim()
@@ -196,4 +199,18 @@ export function resolveContactSendTarget(contact: {
   }
 
   return null
+}
+
+/**
+ * Bot / automation / flow sends to a contact the business blocked in the
+ * CRM must not go out (inbox parity: local block applies to workers and
+ * automation, not just the composer). This is a CRM-side block only — it
+ * does not block the number on WhatsApp.
+ */
+export function assertContactNotBlocked(
+  contact: { blocked_at?: string | null } | null | undefined,
+): void {
+  if (contact?.blocked_at) {
+    throw new Error('contact is blocked in the CRM')
+  }
 }
